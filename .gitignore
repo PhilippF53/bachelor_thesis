@@ -16,3 +16,5 @@ wheels/
 # Files
 todo
 scratchpad.ipynb
+*.sqlite
+*.db
