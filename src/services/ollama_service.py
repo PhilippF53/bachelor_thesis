@@ -5,7 +5,7 @@ class OllamaService:
         self.model_name = model_name
         self.system_prompt = system_prompt
         
-    def get_completion(self, query: str) -> str:
+    def get_response(self, query: str) -> str:
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": query},
