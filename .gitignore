@@ -12,9 +12,14 @@ wheels/
 
 # Directories
 /data/
+/runs/
+/results/
 
 # Files
 todo
 scratchpad.ipynb
 *.sqlite
 *.db
+
+# Logs of long runs
+/logs/

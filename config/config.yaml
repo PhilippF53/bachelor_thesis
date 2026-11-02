@@ -1,0 +1,55 @@
+paths:
+  source_db: data/mimic.db
+  mimicsql_dir: data/mimicsql/MimicSQL2
+  treqs_dir: data/mimicsql/TREQS/evaluation
+  derived_dir: data/derived
+  nl2sql360_dir: data/derived/nl2sql360
+  runs_dir: runs
+  results_dir: results
+  docs_dir: docs
+
+dataset:
+  name: mimicsql
+  db_id: mimicsql
+  question_key: question_refine
+  splits: [train, dev, test]
+  eval_splits: [dev, test]
+
+execution:
+  timeout_s: 30
+
+inference:
+  seed: 42
+  temperature: 0
+  num_ctx: 8192
+  num_predict: 1024
+  keep_alive: 30m
+
+# few-shot examples always come from train
+variants:
+  zero_shot: {k: 0}
+  few_random_k3: {k: 3, strategy: random}
+  few_similar_k3: {k: 3, strategy: similar}
+
+selection:
+  dev_variants: [zero_shot, few_random_k3, few_similar_k3]
+  test_variant: null  # set after comparing variants on dev
+
+# ordered small -> large; `think` is fixed per model, reasoning goes to a separate field
+models:
+  - {name: duckdb-nsql-7b, tag: "duckdb-nsql:latest", format: duckdb_nsql}
+  - {name: codellama-7b, tag: "codellama:7b-instruct", format: chat}
+  - {name: sqlcoder-7b, tag: "sqlcoder:7b", format: sqlcoder}
+  - {name: codellama-13b, tag: "codellama:13b-instruct", format: chat}
+  - {name: sqlcoder-15b, tag: "sqlcoder:15b", format: sqlcoder}
+  - {name: gpt-oss-20b, tag: "gpt-oss:20b", format: chat, think: medium, num_ctx: 16384, num_predict: 8192}
+  - {name: qwen3-coder-30b, tag: "qwen3-coder:30b", format: chat}
+  - {name: codellama-34b, tag: "codellama:34b-instruct", format: chat}
+  - {name: gemma4-31b, tag: "gemma4:31b", format: chat, think: true, num_ctx: 16384, num_predict: 8192}
+  # num_batch 256: with the default (512) prompts > ~800 tokens crash with a CUDA error
+  # (qwen35moe on Turing, Ollama 0.40.2)
+  - {name: qwen3.6, tag: "qwen3.6:latest", format: chat, think: true, num_ctx: 16384, num_predict: 8192,
+     extra_options: {num_batch: 256}}
+  - {name: codellama-70b, tag: "codellama:70b-instruct", format: chat}
+  - {name: gpt-oss-120b, tag: "gpt-oss:120b", format: chat, think: medium, num_ctx: 16384, num_predict: 8192}
+  - {name: llama4-scout, tag: "llama4:scout", format: chat}
