@@ -92,6 +92,15 @@ class PromptContent:
     schema: str
     question: str
     examples: list[Example] = field(default_factory=list)
+    value_hints: list[str] = field(default_factory=list)
+
+    @property
+    def schema_text(self) -> str:
+        """Schema plus the value hints; without hints exactly the schema."""
+        if not self.value_hints:
+            return self.schema
+        lines = "\n".join(f"-- {h}" for h in self.value_hints)
+        return f"{self.schema}\n\n-- Values mentioned in the question, spelled as in the database:\n{lines}"
 
     @property
     def rules_text(self) -> str:
@@ -120,5 +129,6 @@ def build_schema_text(db_path: Path) -> str:
     return "\n\n".join(blocks)
 
 
-def build_content(schema: str, question: str, examples: list[Example]) -> PromptContent:
-    return PromptContent(INSTRUCTION, RULES, schema, question, examples)
+def build_content(schema: str, question: str, examples: list[Example],
+                  value_hints: list[str] | None = None) -> PromptContent:
+    return PromptContent(INSTRUCTION, RULES, schema, question, examples, value_hints or [])

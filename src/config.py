@@ -48,6 +48,19 @@ class ExecutionConfig:
 
 
 @dataclass
+class EvaluationConfig:
+    # repetitions per correct prediction for the VES/R-VES time ratio (BIRD: 100); 0 = off
+    ves_iterations: int = 100
+
+
+@dataclass
+class ReportConfig:
+    # models with known training-data contamination; left out of the cross-model
+    # comparison "solved by how many models"
+    contaminated_models: list[str] = field(default_factory=list)
+
+
+@dataclass
 class InferenceConfig:
     seed: int = 42
     temperature: float = 0
@@ -61,6 +74,9 @@ class VariantConfig:
     name: str
     k: int = 0
     strategy: str | None = None
+    # DB values that occur in the question are listed below the schema (None = off, so
+    # manifests written before this field existed still match)
+    values: bool | None = None
 
 
 @dataclass
@@ -94,6 +110,8 @@ class Config:
     paths: Paths
     dataset: DatasetConfig
     execution: ExecutionConfig
+    evaluation: EvaluationConfig
+    report: ReportConfig
     inference: InferenceConfig
     variants: dict[str, VariantConfig]
     selection: SelectionConfig
@@ -118,6 +136,8 @@ def load_config(path: str | Path) -> Config:
         paths=Paths(**{k: Path(v) for k, v in raw["paths"].items()}),
         dataset=DatasetConfig(**raw["dataset"]),
         execution=ExecutionConfig(**raw.get("execution", {})),
+        evaluation=EvaluationConfig(**raw.get("evaluation", {})),
+        report=ReportConfig(**raw.get("report", {})),
         inference=InferenceConfig(**raw.get("inference", {})),
         variants={name: VariantConfig(name=name, **v) for name, v in raw.get("variants", {}).items()},
         selection=SelectionConfig(**raw["selection"]),

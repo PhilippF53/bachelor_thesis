@@ -2,7 +2,8 @@
 
 Benchmark lokaler LLMs (über Ollama) auf MIMICSQL (MimicSQL2, template-basierte Fragen)
 mit [NL2SQL360](https://github.com/HKUSTDial/NL2SQL360) als Evaluationsrahmen:
-Execution Accuracy (EX), Exact Match (EM), Latenz, Tokens und Fehleranalyse.
+Execution Accuracy (EX), Exact Match (EM), Soft F1, VES und R-VES, Latenz, Tokens und
+Fehleranalyse.
 
 ## Voraussetzungen
 
@@ -59,7 +60,11 @@ jedes Modells.
   `pred_sql` und `extract_method` in `raw.jsonl` sowie `predictions.sql`; das Manifest
   protokolliert den Vorgang (`reextracted`). Danach `evaluate --overwrite` und `report`.
   `evaluate` warnt, wenn gespeicherte SQL und aktuelle Extraktion voneinander abweichen.
-- **`evaluate`** schreibt `per_sample.csv` jedes Mal neu. Eine bestehende
+- **`evaluate`** schreibt `per_sample.csv` jedes Mal neu. Die VES-Messung (siehe
+  [Methodische Entscheidungen](#methodische-entscheidungen)) dauert rund eine Minute je
+  Lauf und wird in `efficiency.csv` zwischengespeichert. Ein erneutes `evaluate` misst nur
+  Vorhersagen neu, deren SQL sich geändert hat. Weil Laufzeiten gemessen werden, sollte
+  `evaluate` laufen, wenn der Rechner sonst nichts tut (nicht parallel zu `infer`). Eine bestehende
   NL2SQL360-Bewertungstabelle wird nur mit `--overwrite` ersetzt. Unvollständige Läufe
   (z.B. `--limit`) landen nur in der CSV, nicht in NL2SQL360.
 - **`report`** erzeugt alle Tabellen und Diagramme neu, aus allen vorhandenen
@@ -105,7 +110,7 @@ alle erzeugten Tokens).
 | `src/eval/` | EX/EM pro Beispiel, `MimicCore` (NL2SQL360-Erweiterung), Schwierigkeitsgrade |
 | `src/analysis/` | Fehlerkategorien, Zusammenfassung, Diagramme |
 | `runs/<split>/<model>/<variant>/` | `manifest.json` (Config-Snapshot, Einstellungen, Zeitstempel, Tag und Digest, Ollama-Version, Git-Commit, GPU-Platzierung), `raw.jsonl` (Prompt, Rohausgabe, Denk-Ausgabe getrennt, extrahierte SQL, Timings, Tokens), `predictions.sql` |
-| `results/<split>/` | je Split (`train`, `dev`, `test`): `gold_check.csv`; für dev und test zusätzlich `runs/<model>/<variant>/per_sample.csv`, `summary.csv/json`, `all_samples.csv`, Fehlertabellen, `figures/`. train enthält nur die Gold-Prüfung, weil darauf keine Modelle laufen (Beispielpool für Few-Shot). |
+| `results/<split>/` | je Split (`train`, `dev`, `test`): `gold_check.csv`; für dev und test zusätzlich `runs/<model>/<variant>/per_sample.csv` und `efficiency.csv` (VES-Cache), `summary.csv/json`, `all_samples.csv`, Fehlertabellen, `solved_by_models.csv`, `figures/` (Liste der Diagramme in `docs/architektur.md`). train enthält nur die Gold-Prüfung, weil darauf keine Modelle laufen (Beispielpool für Few-Shot). |
 | `docs/gold_check.md` | Bericht zur Gold-SQL-Prüfung |
 | `data/derived/` | nachgebaute DB, konvertierte Splits, `tables.json`, NL2SQL360-Datenbank |
 
@@ -147,17 +152,47 @@ alle erzeugten Tokens).
   (`DISABLE_VALUE`/`DISABLE_DISTINCT` in NL2SQL360). EM kann deshalb über EX liegen: Bei den
   meisten Modellen sind Werte in falscher Groß-/Kleinschreibung der häufigste Fehler, und den
   erfasst nur EX.
+- **Soft F1** (BIRD mini-dev, `F1Evaluator` von NL2SQL360) gibt Teilpunkte, wenn das
+  Ergebnis teilweise stimmt: Zellen werden zeilenweise verglichen, Reihenfolge und doppelte
+  Zeilen zählen nicht. Berechnet wird F1 aus den Ergebnissen, die für EX ohnehin im
+  Speicher liegen. Eine Abweichung von BIRD: Dort werden die Zeilen in der Reihenfolge
+  eines Python-`set` gepaart, die sich bei Strings von Prozess zu Prozess ändert. Hier
+  werden sie vorher stabil sortiert, sonst wäre F1 nicht reproduzierbar. 83 % der
+  dev-Gold-Ergebnisse haben genau eine Zeile; dort ist F1 fast immer gleich EX. F1
+  unterscheidet sich vor allem bei Listen-Fragen und knapp falschen Antworten
+  (Diagramm `f1_wrong_answers`).
+- **VES und R-VES** (BIRD, `VesEvaluator`/`RVesEvaluator` von NL2SQL360) gewichten
+  richtige Antworten mit dem Laufzeitverhältnis Gold/Vorhersage: VES mit dessen Wurzel,
+  R-VES mit Belohnungsstufen (≥ 2 → 1,25, ≥ 1 → 1, ≥ 0,5 → 0,75, ≥ 0,25 → 0,5, sonst
+  0,25). Gemessen wird wie in NL2SQL360 (100 Wiederholungen, 3σ-Ausreißerfilter), aber
+  sequenziell, read-only und mit einer gemeinsamen Messung für beide Metriken.
+  **Einschränkung:** Auf der MIMICSQL-DB (100 Aufnahmen) laufen die Gold-Queries im Median
+  0,1 ms. Die gemessenen Verhältnisse liegen deshalb fast alle sehr nah bei 1 (z.B.
+  DuckDB-NSQL, zero-shot: Median 1,00, 90 % zwischen 0,99 und 1,05). VES liegt damit
+  praktisch auf Höhe der EX. R-VES ist zusätzlich verzerrt: Bei gleich schnellen Queries
+  landet etwa die Hälfte zufällig knapp unter 1 und bekommt 0,75 statt 1. Beide Werte
+  sind der Vollständigkeit halber angegeben; Aussagen über die Effizienz der Queries
+  tragen sie auf dieser kleinen DB kaum.
 - **NL2SQL360:** Die Ergebnisse stehen zusätzlich in den NL2SQL360-Tabellen
-  (`data/derived/nl2sql360/nl2sql360.sqlite`). Leaderboards und Filter funktionieren dort
-  also wie gewohnt.
+  (`data/derived/nl2sql360/nl2sql360.sqlite`), mit EX, EM, F1, VES und R-VES.
+  Leaderboards und Filter funktionieren dort also wie gewohnt.
 - **Prompts:** Alle Modelle bekommen denselben Inhalt: Schema mit Spaltenbeschreibungen,
   Anweisung mit ausdrücklichem SQLite-Hinweis, k Beispiele aus train. SQLCoder und
   DuckDB-NSQL erhalten ihn in ihrem trainierten Format (raw). Gesetzt sind
   `temperature=0`, `seed=42` und `num_ctx` explizit. Ist ein Prompt zu lang für
   `num_ctx`, bricht der Lauf ab.
 - **Varianten:** zero-shot, few-shot k=3 zufällig (Seed pro Frage, für alle Modelle
-  gleich) und few-shot k=3 ähnlichkeitsbasiert (TF-IDF). Verglichen wird auf dev, test
-  nur für den finalen Lauf.
+  gleich), few-shot k=3 ähnlichkeitsbasiert (TF-IDF) und dieselbe Variante mit
+  Wert-Hinweisen (`few_similar_k3_values`). Verglichen wird auf dev, test nur für den
+  finalen Lauf.
+- **Wert-Hinweise:** Die Template-Fragen sind kleingeschrieben, die DB speichert Werte in
+  ihrer Originalschreibweise, und `=` auf Text unterscheidet Groß-/Kleinschreibung. Bei 874
+  von 1.376 Textwerten der dev-Gold-SQL steht die DB-Schreibweise nicht in der Frage. Die
+  Variante `few_similar_k3_values` listet unter dem Schema die DB-Werte der Textspalten, die
+  (ohne Groß-/Kleinschreibung, an Wortgrenzen) wörtlich in der Frage vorkommen, in
+  DB-Schreibweise, z.B. `-- DEMOGRAPHIC.GENDER = 'F'`. Zeit- und Messwertspalten und reine
+  Zahlen sind ausgenommen. Auf dev sind das im Mittel 1,5 Werte bzw. ca. 130 Zeichen pro
+  Prompt; die Werte decken alle 874 Fälle ab. Die anderen Varianten bleiben unverändert.
 - **Schwierigkeit:** Spider-Hardness (easy/medium/hard/extra), berechnet mit dem
   Spider-Parser von NL2SQL360 auf der kanonisierten Gold-SQL. Sie steht auch im
   NL2SQL360-Feld `complexity` und ist dort filterbar. dev und test von MimicSQL2
@@ -172,6 +207,7 @@ alle erzeugten Tokens).
   [NSText2SQL](https://huggingface.co/datasets/NumbersStation/NSText2SQL) enthält MIMICSQL
   (`mimicsql_data` aus TREQS). Das erklärt die fast perfekten Werte (dev, zero-shot: 99,1 % EX)
   und die richtige Schreibweise der DB-Werte, die nicht im Prompt stehen. Die Ergebnisse
-  dieses Modells sind deshalb nicht mit denen der anderen Modelle vergleichbar.
+  dieses Modells sind deshalb nicht mit denen der anderen Modelle vergleichbar. Im
+  Diagramm „von wie vielen Modellen gelöst“ fehlt es (`report.contaminated_models`).
 - **Datenschutz:** Abfrageergebnisse werden nur im Speicher verglichen. Gespeichert
-  werden korrekt/falsch, Zeilenanzahl, Fehlermeldung und Laufzeit.
+  werden korrekt/falsch, Soft-F1-Wert, Zeilenanzahl, Fehlermeldung und Laufzeiten.

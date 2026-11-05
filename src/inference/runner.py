@@ -24,6 +24,7 @@ from src.inference.extract import extract_sql
 from src.inference.fewshot import FewShotSelector
 from src.inference.formats import RenderedPrompt, render
 from src.inference.prompts import Example, build_content, build_schema_text
+from src.inference.values import ValueMatcher
 from src.services.ollama_service import LLMResponse, OllamaService
 
 NO_SQL = "NO_SQL_EXTRACTED"
@@ -110,7 +111,8 @@ def prompt_template(model: ModelConfig, variant: VariantConfig, schema: str) -> 
     """The rendered prompt with placeholders: instruction, rules, schema and format exactly
     as the model sees them, independent of the individual question and examples."""
     examples = [Example("<EXAMPLE_QUESTION>", "<EXAMPLE_SQL>")] * variant.k
-    return render(model.format, build_content(schema, "<QUESTION>", examples)).as_text()
+    value_hints = ["<VALUE_HINT>"] if variant.values else []
+    return render(model.format, build_content(schema, "<QUESTION>", examples, value_hints)).as_text()
 
 
 def _sha256(text: str) -> str:
@@ -151,10 +153,13 @@ class InferenceRunner:
         if variant.k > 0:
             self.selector = FewShotSelector(load_samples(config, "train"), variant.strategy,
                                             variant.k, config.inference.seed)
+        self.values = ValueMatcher(config.db_path) if variant.values else None
 
     def render(self, sample: dict) -> tuple[RenderedPrompt, list]:
         examples = self.selector.select(sample) if self.selector else []
-        return render(self.model.format, build_content(self.schema, sample["question"], examples)), examples
+        hints = self.values.hints(sample["question"]) if self.values else []
+        content = build_content(self.schema, sample["question"], examples, hints)
+        return render(self.model.format, content), examples
 
     def call(self, prompt: RenderedPrompt) -> LLMResponse:
         if prompt.mode == "raw":
@@ -272,6 +277,7 @@ class InferenceRunner:
                     "id": sample["id"],
                     "prompt": prompt.as_text(),
                     "example_questions": [e.question for e in examples],
+                    **({"n_value_hints": len(self.values.hints(sample["question"]))} if self.values else {}),
                     **resp.to_dict(),
                     "pred_sql": sql,
                     "extract_method": method,

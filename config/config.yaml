@@ -18,6 +18,15 @@ dataset:
 execution:
   timeout_s: 30
 
+evaluation:
+  # VES/R-VES: gold and prediction run this often per correct prediction (BIRD default 100);
+  # 0 turns the measurement off
+  ves_iterations: 100
+
+report:
+  # trained on MIMICSQL (NSText2SQL), left out of "solved by how many models"
+  contaminated_models: [duckdb-nsql-7b]
+
 inference:
   seed: 42
   temperature: 0
@@ -30,9 +39,11 @@ variants:
   zero_shot: {k: 0}
   few_random_k3: {k: 3, strategy: random}
   few_similar_k3: {k: 3, strategy: similar}
+  # plus the DB values mentioned in the question, in database spelling
+  few_similar_k3_values: {k: 3, strategy: similar, values: true}
 
 selection:
-  dev_variants: [zero_shot, few_random_k3, few_similar_k3]
+  dev_variants: [zero_shot, few_random_k3, few_similar_k3, few_similar_k3_values]
   test_variant: null  # set after comparing variants on dev
 
 # ordered small -> large; `think` is fixed per model, reasoning goes to a separate field

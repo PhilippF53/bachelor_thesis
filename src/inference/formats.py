@@ -23,7 +23,7 @@ class RenderedPrompt:
 
 def render_chat(c: PromptContent) -> RenderedPrompt:
     system = f"{c.instruction}\n\nRules:\n{c.rules_text}"
-    user = f"### Database schema\n{c.schema}\n\n"
+    user = f"### Database schema\n{c.schema_text}\n\n"
     if c.examples:
         user += f"### Examples\n{c.examples_text}\n\n"
     user += f"### Question\nQuestion: {c.question}\nSQL:"
@@ -37,7 +37,7 @@ def render_sqlcoder(c: PromptContent) -> RenderedPrompt:
     prompt = (
         f"### Task\nGenerate a SQLite query to answer [QUESTION]{c.question}[/QUESTION]\n\n"
         f"### Instructions\n{c.instruction}\n{c.rules_text}\n\n"
-        f"### Database Schema\nThe query will run on a database with the following schema:\n{c.schema}\n\n"
+        f"### Database Schema\nThe query will run on a database with the following schema:\n{c.schema_text}\n\n"
     )
     if c.examples:
         prompt += f"### Examples\n{c.examples_text}\n\n"
@@ -54,7 +54,7 @@ def render_duckdb_nsql(c: PromptContent) -> RenderedPrompt:
         "### Instruction:\nYour task is to generate valid SQLite SQL (not DuckDB SQL) to answer "
         "the following question, given a SQLite database schema.\n"
         f"{c.instruction}\n{c.rules_text}\n\n"
-        f"### Input:\nHere is the database schema that the SQL query will run on:\n{c.schema}\n\n"
+        f"### Input:\nHere is the database schema that the SQL query will run on:\n{c.schema_text}\n\n"
     )
     if c.examples:
         prompt += f"Examples:\n{c.examples_text}\n\n"

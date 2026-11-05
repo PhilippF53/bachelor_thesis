@@ -22,7 +22,7 @@ build-db ─▶ prepare ─▶ check-gold ─▶ infer ─▶ evaluate ─▶ re
 | `check-gold` | `src/data/gold_check.py` | konvertierte Splits, DB | `results/<split>/gold_check.csv`, `docs/gold_check.md` |
 | `infer` | `src/inference/runner.py` | konvertierte Splits, DB-Schema, Ollama | `runs/<split>/<model>/<variant>/` |
 | `reextract` | `src/inference/runner.py` | `raw.jsonl` | `pred_sql`/`extract_method` in `raw.jsonl`, `predictions.sql`, Manifest |
-| `evaluate` | `src/eval/mimic_core.py` | `raw.jsonl`, Splits, DB | `results/<split>/runs/<model>/<variant>/per_sample.csv`, NL2SQL360-Evaluationstabellen |
+| `evaluate` | `src/eval/mimic_core.py` | `raw.jsonl`, Splits, DB | `results/<split>/runs/<model>/<variant>/per_sample.csv` und `efficiency.csv`, NL2SQL360-Evaluationstabellen |
 | `report` | `src/analysis/report.py` | alle `per_sample.csv`, Splits | je Split unter `results/<split>/`: `summary.*`, Fehlertabellen, `figures/` |
 
 Abhängigkeiten zwischen den Modulen (Pfeil = importiert):
@@ -34,7 +34,7 @@ cli ─▶ config
     │                  nl2sql360.core
     ─▶ data.gold_check ─▶ eval.hardness, services.database_service
     ─▶ inference.runner ─▶ inference.prompts, inference.fewshot, inference.formats,
-    │                      inference.extract, services.ollama_service
+    │                      inference.values, inference.extract, services.ollama_service
     ─▶ eval.mimic_core ─▶ eval.executor ─▶ eval.hardness, services.database_service
     │                  ─▶ eval.nl2sql360_tables, inference.extract
     │                  ─▶ inference.runner (load_samples, load_records)
@@ -53,8 +53,10 @@ cli ─▶ config
 | `paths` | Quell-DB, MimicSQL2, TREQS, Ausgabeordner (`derived_dir`, `runs_dir`, `results_dir`, `docs_dir`) |
 | `dataset` | Datensatzname und `db_id`, Fragefeld (`question_refine`), alle Splits, ausgewertete Splits (`eval_splits`) |
 | `execution` | Timeout für SQL-Ausführung in Sekunden |
+| `evaluation` | `ves_iterations`: Wiederholungen je richtiger Vorhersage für VES/R-VES (BIRD: 100, `0` = aus) |
+| `report` | `contaminated_models`: Modelle mit bekannter Kontamination, nicht in „von wie vielen Modellen gelöst“ |
 | `inference` | globale Ollama-Optionen: `temperature`, `seed`, `num_ctx`, `num_predict`, `keep_alive` |
-| `variants` | Prompt-Varianten: `k` Beispiele, `strategy` (`random` / `similar`) |
+| `variants` | Prompt-Varianten: `k` Beispiele, `strategy` (`random` / `similar`), optional `values: true` (Wert-Hinweise) |
 | `selection` | `dev_variants` (Vergleich auf dev), `test_variant` (finaler Lauf auf test) |
 | `models` | Liste von Modellen, klein nach groß; Reihenfolge bestimmt die Laufreihenfolge |
 
@@ -68,7 +70,7 @@ allen Tabellen und Diagrammen.
 ### `src/config.py`
 
 Lädt die YAML in Dataclasses. `Config` bündelt `Paths`, `DatasetConfig`,
-`ExecutionConfig`, `InferenceConfig`, `VariantConfig`s, `SelectionConfig` und
+`ExecutionConfig`, `EvaluationConfig`, `ReportConfig`, `InferenceConfig`, `VariantConfig`s, `SelectionConfig` und
 `ModelConfig`s; das unveränderte YAML-Dict liegt zusätzlich in `Config.raw` und wird als
 Snapshot ins Manifest jedes neuen Laufs geschrieben.
 
@@ -193,7 +195,8 @@ Nicht ausführbare Gold-Queries schließt die Bewertung über `exec_acc = None` 
 
 Ein `InferenceRunner` ist genau ein Lauf aus (Modell, Variante, Split) mit Ordner
 `runs/<split>/<model>/<variant>/`. Beim Erzeugen baut er den `OllamaService`, den
-Schematext und, bei `k > 0`, den `FewShotSelector` über den Train-Split.
+Schematext, bei `k > 0` den `FewShotSelector` über den Train-Split und bei `values` den
+`ValueMatcher`.
 
 Ablauf von `run(limit, overall, label)`:
 
@@ -205,7 +208,7 @@ Ablauf von `run(limit, overall, label)`:
 3. **Konsistenzprüfung**, nur wenn es offene Fragen gibt: `_settings()` beschreibt alles,
    was bei einer Fortsetzung gleich bleiben muss: Modell-Config, Optionen, Variante,
    SHA-256 des Schemas und SHA-256 der gerenderten Prompt-Vorlage (`prompt_template`:
-   der Prompt mit Platzhaltern statt Frage und Beispielen). `_resumed_manifest()` prüft
+   der Prompt mit Platzhaltern statt Frage, Beispielen und Wert-Hinweisen). `_resumed_manifest()` prüft
    zuerst mit `_stored_prompts_match()`, dass die aktuelle Fassung jeden gespeicherten
    Prompt exakt reproduziert; das deckt auch Fragetexte und Few-Shot-Beispiele ab, die der
    Vorlagen-Hash nicht sieht. Dann vergleicht es die Einstellungen und den Modell-Digest.
@@ -240,8 +243,20 @@ Modellunabhängiger Prompt-Inhalt:
 - `build_schema_text(db_path)`: `CREATE TABLE`-Statements aus `PRAGMA table_info` mit der
   Beschreibung als SQL-Kommentar und einem Hinweis auf `HADM_ID` als Join-Schlüssel. Es
   werden nur Metadaten gelesen.
-- `PromptContent` (Instruktion, Regeln, Schema, Frage, Beispiele) mit `rules_text` und
-  `examples_text`; `build_content()` setzt ihn zusammen.
+- `PromptContent` (Instruktion, Regeln, Schema, Frage, Beispiele, Wert-Hinweise) mit
+  `rules_text`, `examples_text` und `schema_text` (Schema plus Wert-Hinweise; ohne Hinweise
+  exakt das Schema, sodass die übrigen Varianten unverändert rendern); `build_content()`
+  setzt ihn zusammen.
+
+### `src/inference/values.py`
+
+`ValueMatcher(db_path)` lädt einmal die verschiedenen Werte der TEXT-Spalten der fünf
+Tabellen, ohne Zeit- und Messwertspalten (`SKIP_COLUMNS`) und ohne reine Zahlen.
+`hints(question)` liefert `TABLE.COLUMN = 'Wert'` für jeden Wert, der ohne
+Groß-/Kleinschreibung an Wortgrenzen in der Frage steht, in DB-Schreibweise; ein Wert, der
+in einem längeren Treffer derselben Spalte enthalten ist, entfällt. Die Werte bleiben im
+Speicher und gehen nur in den Prompt; `raw.jsonl` speichert nur ihre Anzahl
+(`n_value_hints`).
 
 ### `src/inference/fewshot.py`
 
@@ -262,7 +277,7 @@ Rendert einen `PromptContent` in das Format des Modells (`RENDERERS`, ausgewähl
 
 | Format | Modus | Aufbau |
 |---|---|---|
-| `chat` | Chat-API | System: Instruktion + Regeln; User: Schema, Beispiele, `Question: … SQL:` |
+| `chat` | Chat-API | System: Instruktion + Regeln; User: Schema (+ Wert-Hinweise), Beispiele, `Question: … SQL:` |
 | `sqlcoder` | raw | `### Task` / `### Instructions` / `### Database Schema` / `### Examples` / `### Answer … [SQL]` |
 | `duckdb_nsql` | raw | `### Instruction` / `### Input` / `Examples` / `### Question` / `### Response`, mit SQLite als Zieldialekt |
 
@@ -312,13 +327,16 @@ variant, run_path, overwrite)`. Der NL2SQL360-Code selbst bleibt unverändert.
    Extraktion ab, gibt es eine Warnung (dann zuerst `reextract`). Fehlen Antworten (z.B.
    Testlauf mit `--limit`), werden nur die vorhandenen bewertet.
 2. Für jedes Sample `SampleEvaluator.score(pred_sql, sql)` und eine Ergebniszeile mit
-   Score, Latenz, Tokens, Thinking-Länge und Schwierigkeit → `per_sample.csv` (immer neu
-   geschrieben).
-3. Nur bei vollständigen Läufen: Speichern in der NL2SQL360-Tabelle
+   Score, Latenz, Tokens, Thinking-Länge und Schwierigkeit.
+3. `add_efficiency`: Zeitverhältnis, VES und R-VES je Zeile (siehe
+   `src/eval/efficiency.py`), dann `per_sample.csv` (immer neu geschrieben).
+4. Nur bei vollständigen Läufen: Speichern in der NL2SQL360-Tabelle
    `DATASET_mimicsql_<split>_EVALUATION_<model>__<variant>` (`eval_name` ersetzt
    Sonderzeichen durch `_`, weil NL2SQL360 Tabellennamen ungequotet einsetzt). Eine
    vorhandene Tabelle wird nur mit `overwrite` ersetzt (`nl2sql360_tables.drop_evaluation`,
-   ohne die interaktive Rückfrage von NL2SQL360).
+   ohne die interaktive Rückfrage von NL2SQL360). Befüllt werden `exec_acc`, `exact_acc`,
+   `f1`, `ves` und `rves`; damit funktionieren `query_overall_performance` und die
+   Leaderboards von NL2SQL360 auch für F1, VES und R-VES.
 
 Der `SampleEvaluator` wird erst beim ersten Zugriff erzeugt (Property `evaluator`).
 
@@ -337,9 +355,46 @@ NL2SQL360:
   `DISABLE_DISTINCT`). Ergebnis `None`, wenn die Gold-SQL nicht parsebar ist. Fehlt die
   Vorhersage, ist EM = 0 ohne Parse-Fehler. Ein Parse-Fehler der Vorhersage ergibt die
   leere SQL (also EM = 0) und wird in `em_parse_error_pred` vermerkt.
+- **F1:** Soft F1 nach BIRD (`soft_f1` in `src/eval/metrics.py`) aus den Ergebniszeilen,
+  die für EX ohnehin im Speicher liegen; keine zusätzliche Ausführung. `None` wie bei EX,
+  `0`, wenn die Vorhersage fehlt oder fehlschlägt.
 
-`SampleScore` enthält EX, EM, Ausführungsstatus, Fehlermeldung, Zeilenzahlen, Laufzeit
+`SampleScore` enthält EX, EM, F1, Ausführungsstatus, Fehlermeldung, Zeilenzahlen, Laufzeit
 und Parse-Fehler.
+
+### `src/eval/metrics.py`
+
+- `soft_f1(pred_rows, gold_rows)`: wie `calculate_f1_score` aus NL2SQL360 (BIRD
+  mini-dev): Duplikate entfernen, Zeilen paarweise vergleichen, Zellen mit
+  `calculate_row_match` (aus NL2SQL360 importiert), daraus Precision, Recall, F1.
+  Einzige Änderung: BIRD paart die Zeilen in der Iterationsreihenfolge eines `set`, und
+  die ändert sich bei Strings von Prozess zu Prozess (Hash-Randomisierung). Hier werden
+  die Zeilen vorher stabil sortiert, der Wert ist also reproduzierbar. Beide Ergebnisse
+  leer → 1, wie in BIRD.
+- `rves_reward(time_ratio)`: Belohnungsstufen von `bird_rves` (Zeitverhältnis
+  Gold/Vorhersage ≥ 2 → 1,25; ≥ 1 → 1; ≥ 0,5 → 0,75; ≥ 0,25 → 0,5; sonst 0,25; falsch → 0).
+- `ves_score` = √Zeitverhältnis, `rves_score` = √Belohnung: die Werte pro Sample, die
+  auch `VesEvaluator`/`RVesEvaluator` von NL2SQL360 speichern. Der Gesamtwert ist der
+  Mittelwert × 100.
+
+### `src/eval/efficiency.py`
+
+`EfficiencyMeter.time_ratio(pred, gold)` misst wie `bird_ves.iterated_execute_sql`: Gold
+und Vorhersage laufen abwechselnd `evaluation.ves_iterations`-mal (Standard 100), jeweils
+auf einer neuen Verbindung (Verbindungsaufbau ungemessen, Cursor/Execute/Fetch/Close
+gemessen). Das Zeitverhältnis ist der Mittelwert von Gold-Zeit / Vorhersage-Zeit nach dem
+3σ-Ausreißerfilter `clean_abnormal` aus NL2SQL360. Gemessen werden nur Vorhersagen mit
+EX = 1 (entspricht `reuse_ex=True`); falsche bekommen 0, Timeout oder Fehler ebenfalls 0.
+
+Unterschiede zu NL2SQL360: Verbindung read-only mit echtem Timeout (Progress-Handler wie
+`DBService`), sequenziell statt 8 parallele Prozesse (weniger Messrauschen), eine Messung
+für VES und R-VES statt zwei.
+
+`EfficiencyCache` speichert pro Lauf `efficiency.csv` (`key`, `measurement_hash` über
+Iterationen, Vorhersage und Gold, `time_ratio`, `measured_at`). `evaluate` misst nur neu,
+wenn sich der Hash geändert hat; Einträge von Fragen, die nicht mehr richtig sind,
+fallen beim Speichern weg. `evaluation.ves_iterations: 0` schaltet die Messung ab
+(VES/R-VES leer).
 
 ### `src/eval/nl2sql360_tables.py`
 
@@ -367,19 +422,35 @@ Deadline geprüft und die Abfrage in SQLite selbst abgebrochen (`interrupted` �
    über `categorize()` gegen `sql_norm`, plus Zuordnung zu einer Fehlergruppe
    (`ERROR_GROUPS`).
 3. `add_train_duplicates`: Spalte `train_duplicate`, wenn Frage und Gold-SQL identisch auch
-   in train stehen.
-4. `summarize`: je (Split, Modell, Variante) `n`, `n_scored`, EX, EM, `n_train_dup`,
+   in train stehen. `add_gold_tables`: Spalte `gold_tables` (Tabellen aus FROM/JOIN der
+   Gold-SQL, mit `|` getrennt).
+4. `summarize`: je (Split, Modell, Variante) `n`, `n_scored`, EX, EM, F1, VES, R-VES, `n_train_dup`,
    `EX_excl_train_dup` (EX ohne train-Duplikate; EX-Werte in %), Latenz (Mittel, Median),
    Prompt- und Output-Tokens, `no_sql`, `output_truncated`, EM-Parse-Fehler,
    `gold_excluded`.
 5. Tabellen je Split unter `results/<split>/`: `all_samples.csv`, `summary.csv`,
    `summary.json`, `errors_by_model.csv`, `ex_by_spider_hardness.csv`,
-   `errors_by_model_spider_hardness.csv`.
-6. `plot_split`: Diagramme als PNG und SVG unter `results/<split>/figures/`: EX je
-   Variante (wenn mehrere), EX und EM je Modell, Latenz gegen EX, Heatmap EX nach
-   Schwierigkeit, gestapelte Fehlergruppen. Außer „EX je Variante“ zeigen auf dev alle
-   Diagramme die beste Variante je Modell, auf test die eine Test-Variante; der Titel nennt
-   sie.
+   `errors_by_model_spider_hardness.csv`, `solved_by_models.csv` (je Frage: Anzahl und
+   Namen der Modelle, die sie lösen; ohne `report.contaminated_models`).
+6. `plot_split`: Diagramme als PNG und SVG unter `results/<split>/figures/`:
+
+   | Datei | Inhalt |
+   |---|---|
+   | `ex_by_variant` | EX je Modell und Variante (nur wenn mehrere Varianten) |
+   | `ex_em` | EX und EM je Modell |
+   | `metrics_overview` | Heatmap Modell × EX, EM, F1, VES, R-VES |
+   | `latency_vs_ex` | Median-Latenz gegen EX |
+   | `ex_by_spider_hardness` | Heatmap EX nach Schwierigkeit |
+   | `ex_by_table` | Heatmap EX nach Tabelle in der Gold-SQL (eine Frage zählt für jede ihrer Tabellen) |
+   | `error_groups` | Fehlergruppen, Anteil aller Fragen |
+   | `f1_wrong_answers` | Soft F1 der falschen Antworten (0 / unter 0,5 / ab 0,5 / 1), Anteil der falschen Antworten |
+   | `rves_rewards` | R-VES-Belohnungsklassen der richtigen Antworten |
+   | `value_hints_<variante>` | je Paar aus Variante mit `values` und gleicher Variante ohne: EX und Anteil der Fehler mit falscher Wert-Schreibweise, alle Modelle |
+   | `ex_train_duplicates` | EX mit und ohne train-Duplikate |
+   | `solved_by_models` | Fragen nach Anzahl der Modelle, die sie lösen, gestapelt nach Schwierigkeit; ohne `report.contaminated_models` |
+
+   Außer `ex_by_variant` und `value_hints_*` zeigen auf dev alle Diagramme die beste
+   Variante je Modell (nach EX), auf test die eine Test-Variante; der Titel nennt sie.
 
 Reihenfolge: `_ranks`/`_sorted` ordnen Splits, Modelle und Varianten wie in der Config,
 die Schwierigkeit nach `HARDNESS_ORDER` (easy, medium, hard, extra) und Fehlerkategorien
@@ -447,6 +518,7 @@ Eine Zeile pro beantworteter Frage:
 | `key`, `id` | Bezug zum Sample |
 | `prompt` | gerenderter Prompt (`RenderedPrompt.as_text()`) |
 | `example_questions` | Fragen der Few-Shot-Beispiele |
+| `n_value_hints` | Anzahl der Wert-Hinweise (nur Varianten mit `values`) |
 | `content` | Rohantwort des Modells (ohne Thinking) |
 | `thinking` | Denk-Ausgabe, getrennt; `null` bei Modellen ohne Reasoning |
 | `prompt_tokens`, `output_tokens` | Token-Zahlen laut Ollama (`output_tokens` inkl. Reasoning) |
@@ -459,13 +531,18 @@ Eine Zeile pro beantworteter Frage:
 ### `results/<split>/runs/<model>/<variant>/per_sample.csv`
 
 `id`, `key`, `model`, `variant`, `split`, `pred_sql`, `extract_method`, alle Felder von
-`SampleScore` (`exec_acc`, `exact_acc`, `pred_ok`, `pred_error`, `pred_row_count`,
+`SampleScore` (`exec_acc`, `exact_acc`, `f1`, `pred_ok`, `pred_error`, `pred_row_count`,
 `pred_runtime_s`, `gold_row_count`, `em_parse_error_gold`, `em_parse_error_pred`),
 `latency_s`, `total_duration_s`, `prompt_tokens`, `output_tokens`, `thinking_chars`,
-`output_truncated`, `spider_hardness`.
+`output_truncated`, `spider_hardness`, `time_ratio`, `ves`, `rves`.
 
 `report` ergänzt in `all_samples.csv` die Spalten `error_category`, `error_flags`
-(mit `|` getrennt), `error_group` und `train_duplicate`.
+(mit `|` getrennt), `error_group`, `train_duplicate` und `gold_tables`.
+
+### `results/<split>/runs/<model>/<variant>/efficiency.csv`
+
+Cache der VES-Messung: `key`, `measurement_hash`, `time_ratio`, `measured_at`; nur
+Fragen mit EX = 1. Löschen erzwingt eine neue Messung.
 
 ---
 
@@ -474,9 +551,10 @@ Eine Zeile pro beantworteter Frage:
 | Datei | Prüft |
 |---|---|
 | `tests/test_extract.py` | SQL-Extraktion: Antwortformen, schließender Fence ohne öffnenden, Kommentare, Prosa vor und nach der SQL, letzter SQL-Block gewinnt, `WITH`, Whitespace, keine SQL |
-| `tests/test_prompts.py` | Few-Shot-Auswahl (deterministisch je Key, bestes Beispiel zuletzt), gleicher Inhalt in allen Formaten, `normalize_literals`, Vorlagen-Hash |
+| `tests/test_prompts.py` | Few-Shot-Auswahl (deterministisch je Key, bestes Beispiel zuletzt), gleicher Inhalt in allen Formaten, `normalize_literals`, Vorlagen-Hash, Wert-Hinweise (DB-Schreibweise, längster Treffer, Ausnahmen; Prompts ohne Hinweise unverändert) |
 | `tests/test_errors.py` | Fehlerkategorisierung |
-| `tests/test_executor.py` | EX/EM auf einer synthetischen Mini-DB, fehlende Vorhersage (EM = 0 ohne Parse-Fehler) |
+| `tests/test_executor.py` | EX/EM/F1 auf einer synthetischen Mini-DB, fehlende Vorhersage (EM = 0 ohne Parse-Fehler) |
+| `tests/test_metrics.py` | Soft F1 (Teilpunkte, Reihenfolge, leere Ergebnisse), R-VES-Stufen, VES-Messung (read-only, Fehler → 0), Cache-Invalidierung |
 | `tests/test_report.py` | Anzeigereihenfolge (Schwierigkeit easy → hard, Modelle nach Config) |
 
 Ausführen mit `uv run pytest`.
