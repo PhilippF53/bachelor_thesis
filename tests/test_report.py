@@ -15,3 +15,15 @@ def test_hardness_columns_and_models_in_display_order():
     t = _sorted(df.pivot_table(index="model", columns="spider_hardness", values="exec_acc"), _ranks(config))
     assert list(t.columns) == ["easy", "medium", "hard"]
     assert list(t.index) == [small, large]
+
+
+def test_best_variant_ignores_incomplete_runs():
+    from src.analysis.report import best_runs
+
+    s = pd.DataFrame({
+        "model": ["m", "m", "m"],
+        "variant": ["a", "b", "partial"],
+        "n": [796, 796, 10],
+        "EX": [70.0, 80.0, 100.0],
+    })
+    assert best_runs(s)["variant"].tolist() == ["b"]

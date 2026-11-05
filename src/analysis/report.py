@@ -1,6 +1,7 @@
 """Error analysis, summary tables (CSV/JSON) and figures from results/<split>/runs/**/per_sample.csv."""
 
 import json
+import re
 import sqlite3
 
 import matplotlib
@@ -120,7 +121,22 @@ def add_train_duplicates(config: Config, df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(train_duplicate=[dup[k] for k in zip(df["split"], df["key"])])
 
 
+def add_gold_tables(config: Config, df: pd.DataFrame) -> pd.DataFrame:
+    """Tables used by the gold SQL (FROM/JOIN), "|"-separated in schema order."""
+    conn = sqlite3.connect(f"file:{config.db_path.resolve()}?mode=ro", uri=True)
+    order = [r[0].upper() for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+    conn.close()
+    tables = {}
+    for split in df["split"].unique():
+        for smp in load_samples(config, split):
+            used = {t.upper() for t in re.findall(r'\b(?:FROM|JOIN)\s+"?(\w+)', smp["sql"], flags=re.IGNORECASE)}
+            tables[(split, smp["key"])] = "|".join(t for t in order if t in used)
+    return df.assign(gold_tables=[tables[k] for k in zip(df["split"], df["key"])])
+
+
 def summarize(df: pd.DataFrame) -> pd.DataFrame:
+    # per_sample.csv written before F1/VES/R-VES existed: columns stay empty
+    df = df.reindex(columns=list(df.columns) + [c for c in ("f1", "ves", "rves") if c not in df.columns])
     df = df.assign(exec_acc_no_dup=df["exec_acc"].where(~df["train_duplicate"]))
     g = df.groupby(["split", "model", "variant"], sort=False)
     summary = g.agg(
@@ -128,6 +144,9 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
         n_scored=("exec_acc", "count"),
         EX=("exec_acc", "mean"),
         EM=("exact_acc", "mean"),
+        F1=("f1", "mean"),
+        VES=("ves", "mean"),
+        **{"R-VES": ("rves", "mean")},
         n_train_dup=("train_duplicate", "sum"),
         EX_excl_train_dup=("exec_acc_no_dup", "mean"),
         latency_mean_s=("latency_s", "mean"),
@@ -140,7 +159,7 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
         em_parse_error_gold=("em_parse_error_gold", lambda x: x.notna().sum()),
     ).reset_index()
     summary["gold_excluded"] = summary["n"] - summary["n_scored"]
-    for col in ("EX", "EM", "EX_excl_train_dup"):
+    for col in ("EX", "EM", "F1", "VES", "R-VES", "EX_excl_train_dup"):
         summary[col] = (summary[col] * 100).round(2)
     for cols, digits in ((["latency_mean_s", "latency_median_s"], 3), (["prompt_tokens_mean", "output_tokens_mean"], 1)):
         summary[cols] = summary[cols].round(digits)
@@ -174,6 +193,103 @@ def _grouped_bars(ax, table: pd.DataFrame, value_fmt="{:.1f}") -> None:
     ax.legend(frameon=False, labelcolor=TEXT_2, ncols=min(n, 4), loc="upper left", bbox_to_anchor=(0, -0.25))
 
 
+def _heatmap(t: pd.DataFrame, title: str, cbar_label: str, col_labels: list[str] | None = None,
+             vmax: float = 100):
+    """Annotated heatmap, sequential single hue; rows and columns as given."""
+    fig, ax = plt.subplots(figsize=(1.2 * len(t.columns) + 3, 0.45 * len(t.index) + 1.8))
+    im = ax.imshow(t.values.astype(float), cmap=SEQ_BLUES, vmin=0, vmax=vmax, aspect="auto")
+    for i in range(t.shape[0]):
+        for j in range(t.shape[1]):
+            v = t.values[i, j]
+            if pd.notna(v):
+                ax.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=8,
+                        color="white" if v > 0.6 * vmax else TEXT)
+    ax.set_xticks(range(len(t.columns)), col_labels or list(t.columns), fontsize=8)
+    ax.set_yticks(range(len(t.index)), t.index, fontsize=8)
+    fig.colorbar(im, ax=ax, label=cbar_label, shrink=0.8)
+    ax.set_title(title, loc="left", color=TEXT, fontsize=11)
+    return fig, ax
+
+
+def _stacked_shares(ax, t: pd.DataFrame, colors: list[str], legend_title: str | None = None,
+                    legend_y: float = -0.3) -> None:
+    """Stacked bars of row shares (rows sum to 100)."""
+    bottom = pd.Series(0.0, index=t.index)
+    for col, color in zip(t.columns, colors):
+        ax.bar(range(len(t.index)), t[col], bottom=bottom, color=color, label=col,
+               edgecolor=SURFACE, linewidth=1)
+        bottom += t[col]
+    ax.set_xticks(range(len(t.index)), t.index, rotation=30, ha="right")
+    ax.legend(frameon=False, labelcolor=TEXT_2, ncols=3, loc="upper left", bbox_to_anchor=(0, legend_y),
+              title=legend_title, title_fontsize=8, fontsize=8)
+
+
+def _dumbbell(ax, t: pd.DataFrame, start: str, end: str, labels: tuple[str, str]) -> None:
+    """One row per index entry: grey line from `start` to `end`, two coloured points."""
+    y = range(len(t.index))[::-1]  # first row on top
+    ax.hlines(list(y), t[start], t[end], color=GRID, linewidth=2.5, zorder=1)
+    ax.scatter(t[start], list(y), s=40, color=SERIES[1], label=labels[0], zorder=3,
+               edgecolors=SURFACE, linewidths=1.5)
+    ax.scatter(t[end], list(y), s=40, color=SERIES[0], label=labels[1], zorder=3,
+               edgecolors=SURFACE, linewidths=1.5)
+    ax.set_yticks(list(y), t.index, fontsize=8)
+    ax.set_facecolor(SURFACE)
+    ax.grid(axis="x", color=GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    ax.tick_params(colors=TEXT_2)
+
+
+# ordinal palettes: light -> dark blue; R-VES diverging around "as fast as gold"
+F1_BUCKETS = ["F1 = 0", "0 < F1 < 0,5", "0,5 ≤ F1 < 1", "F1 = 1"]
+F1_COLORS = ["#dbe9f6", "#9cc3e5", "#4a90d0", "#1a5aa0"]
+RVES_CLASSES = {1.25: "≥ 2 (1,25)", 1.0: "1 bis 2 (1,0)", 0.75: "0,5 bis 1 (0,75)",
+                0.5: "0,25 bis 0,5 (0,5)", 0.25: "< 0,25 (0,25)"}
+RVES_COLORS = ["#1a5aa0", "#7fb0de", "#f4b183", "#e57a3c", "#b4471a"]
+METRICS = ["EX", "EM", "F1", "VES", "R-VES"]
+
+
+def _f1_bucket(f1: float) -> str:
+    if f1 == 0:
+        return F1_BUCKETS[0]
+    if f1 < 0.5:
+        return F1_BUCKETS[1]
+    return F1_BUCKETS[2] if f1 < 1 else F1_BUCKETS[3]
+
+
+def best_runs(s: pd.DataFrame) -> pd.DataFrame:
+    """Summary row of the best variant (EX) per model; only runs with the full number of
+    questions compete, so a test run with --limit cannot win with a few easy questions."""
+    full = s[s["n"] == s["n"].max()]
+    return full.loc[full.groupby("model")["EX"].idxmax()]
+
+
+def value_hint_pairs(config: Config) -> list[tuple[str, str]]:
+    """(variant without hints, same variant with value hints) as configured."""
+    pairs = []
+    for v in config.variants.values():
+        if v.values:
+            pairs += [(b.name, v.name) for b in config.variants.values()
+                      if not b.values and (b.k, b.strategy) == (v.k, v.strategy)]
+    return pairs
+
+
+def solved_by_models(config: Config, sel: pd.DataFrame) -> pd.DataFrame:
+    """Per question: how many (and which) models solve it with their selected variant;
+    models in report.contaminated_models are left out."""
+    d = sel[~sel["model"].isin(config.report.contaminated_models) & sel["exec_acc"].notna()]
+    order = {m.name: i for i, m in enumerate(config.models)}
+    g = d.groupby(["key", "id", "spider_hardness"])
+    return g.agg(
+        n_models=("model", "size"),
+        n_models_solved=("exec_acc", "sum"),
+        models_solved=("model", lambda m: "|".join(sorted(m[d.loc[m.index, "exec_acc"] == 1],
+                                                          key=lambda x: order.get(x, len(order))))),
+    ).reset_index().astype({"n_models_solved": int}).sort_values("id")
+
+
 def plot_split(config: Config, split: str, df: pd.DataFrame, s: pd.DataFrame, fig_dir) -> None:
     """Figures for one split; df and s contain only this split."""
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -198,18 +314,25 @@ def plot_split(config: Config, split: str, df: pd.DataFrame, s: pd.DataFrame, fi
         _style(ax, f"Execution Accuracy je Prompt-Variante ({split})", "EX (%)")
         save(fig, "ex_by_variant")
     # EX and EM per model
-    best = _sorted(s.loc[s.groupby("model")["EX"].idxmax()].set_index("model"), ranks)
+    best = _sorted(best_runs(s).set_index("model"), ranks)
     fig, ax = plt.subplots(figsize=(10, 4.8))
     _grouped_bars(ax, best[["EX", "EM"]])
     _style(ax, f"EX und EM je Modell ({split}, {which})", "%")
     save(fig, "ex_em")
 
+    # all metrics at a glance; VES can exceed 100 (prediction faster than gold)
+    m = best[METRICS]
+    if m[["F1", "VES", "R-VES"]].notna().any().any():
+        vmax = max(100.0, float(m.max().max()))
+        fig, _ = _heatmap(m, f"Metriken je Modell ({split}, {which})", "Wert (%)", vmax=vmax)
+        save(fig, "metrics_overview")
+
     # latency vs EX: one point per model, direct labels
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.scatter(best["latency_median_s"], best["EX"], s=64, color=SERIES[0],
                edgecolors=SURFACE, linewidths=2, zorder=3)
-    for m, r in best.iterrows():
-        ax.annotate(m, (r["latency_median_s"], r["EX"]), xytext=(5, 4), textcoords="offset points",
+    for mdl, r in best.iterrows():
+        ax.annotate(mdl, (r["latency_median_s"], r["EX"]), xytext=(5, 4), textcoords="offset points",
                     fontsize=8, color=TEXT_2)
     ax.set_xscale("log")
     ax.set_xlabel("Median-Latenz pro Anfrage (s, log)", color=TEXT_2)
@@ -217,23 +340,23 @@ def plot_split(config: Config, split: str, df: pd.DataFrame, s: pd.DataFrame, fi
     save(fig, "latency_vs_ex")
 
     sel = df.merge(best.reset_index()[["model", "variant"]], on=["model", "variant"])
-    # EX by difficulty: heatmap, sequential single hue, columns from easy to hard
-    h = sel.pivot_table(index="model", columns="spider_hardness", values="exec_acc", aggfunc="mean") * 100
-    h = _sorted(h, ranks)
-    fig, ax = plt.subplots(figsize=(1.2 * len(h.columns) + 3, 0.45 * len(h.index) + 1.8))
-    im = ax.imshow(h.values, cmap=SEQ_BLUES, vmin=0, vmax=100, aspect="auto")
-    for i in range(h.shape[0]):
-        for j in range(h.shape[1]):
-            v = h.values[i, j]
-            if pd.notna(v):
-                ax.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=8,
-                        color="white" if v > 60 else TEXT)
+    # EX by difficulty: columns from easy to hard
+    h = _sorted(sel.pivot_table(index="model", columns="spider_hardness", values="exec_acc",
+                                aggfunc="mean") * 100, ranks)
     counts = sel.drop_duplicates("key")["spider_hardness"].value_counts()
-    ax.set_xticks(range(len(h.columns)), [f"{c}\n(n={counts.get(c, 0)})" for c in h.columns], fontsize=8)
-    ax.set_yticks(range(len(h.index)), h.index, fontsize=8)
-    fig.colorbar(im, ax=ax, label="EX (%)", shrink=0.8)
-    ax.set_title(f"EX nach Schwierigkeit (Spider-Hardness)\n{split}, {which}", loc="left", color=TEXT, fontsize=11)
+    fig, _ = _heatmap(h, f"EX nach Schwierigkeit (Spider-Hardness)\n{split}, {which}", "EX (%)",
+                      [f"{c}\n(n={counts.get(c, 0)})" for c in h.columns])
     save(fig, "ex_by_spider_hardness")
+
+    # EX by table in the gold SQL (a question counts for every table it uses)
+    tab = sel[sel["exec_acc"].notna()].assign(table=sel["gold_tables"].str.split("|")).explode("table")
+    t = _sorted(tab.pivot_table(index="model", columns="table", values="exec_acc", aggfunc="mean") * 100,
+                ranks)
+    tcounts = tab.drop_duplicates(["key", "table"])["table"].value_counts()
+    t = t[sorted(t.columns, key=lambda c: -tcounts.get(c, 0))]
+    fig, _ = _heatmap(t, f"EX nach Tabelle in der Gold-SQL\n{split}, {which}", "EX (%)",
+                      [f"{c}\n(n={tcounts.get(c, 0)})" for c in t.columns])
+    save(fig, "ex_by_table")
 
     # error groups: stacked bars, share of all scored samples
     err = sel[sel["exec_acc"] == 0]
@@ -242,19 +365,100 @@ def plot_split(config: Config, split: str, df: pd.DataFrame, s: pd.DataFrame, fi
         t = t.div(sel.groupby("model")["exec_acc"].count(), axis=0).mul(100)
         t = _sorted(t, ranks)[[g for g in GROUP_ORDER if g in t.columns]]
         fig, ax = plt.subplots(figsize=(10, 5))
-        bottom = pd.Series(0.0, index=t.index)
-        for col in t.columns:
-            ax.bar(t.index, t[col], bottom=bottom, color=SERIES[GROUP_ORDER.index(col)], label=col,
-                   edgecolor=SURFACE, linewidth=1)
-            bottom += t[col]
-        ax.set_xticks(range(len(t.index)), t.index, rotation=30, ha="right")
-        ax.legend(frameon=False, labelcolor=TEXT_2, ncols=3, loc="upper left", bbox_to_anchor=(0, -0.3))
+        _stacked_shares(ax, t, [SERIES[GROUP_ORDER.index(c)] for c in t.columns])
         _style(ax, f"Fehlerkategorien ({split}, {which}, Anteil aller Fragen)", "% der Fragen")
         save(fig, "error_groups")
 
+    # how close are the wrong answers: soft F1 of the EX = 0 answers
+    wrong = err[err["f1"].notna()]
+    if len(wrong):
+        t = pd.crosstab(wrong["model"], wrong["f1"].map(_f1_bucket), normalize="index").mul(100)
+        t = _sorted(t.reindex(columns=F1_BUCKETS, fill_value=0), ranks)
+        n = wrong.groupby("model").size()
+        t.index = [f"{mdl}\n(n={n[mdl]})" for mdl in t.index]
+        fig, ax = plt.subplots(figsize=(10, 5.4))
+        _stacked_shares(ax, t, F1_COLORS, "Soft F1 der falschen Antwort", legend_y=-0.42)
+        _style(ax, f"Wie nah liegen falsche Antworten? ({split}, {which})", "% der falschen Antworten")
+        save(fig, "f1_wrong_answers")
+
+    # R-VES reward classes of the correct answers (time ratio gold / prediction)
+    right = sel[(sel["exec_acc"] == 1) & sel["rves"].notna()]
+    if len(right):
+        reward = (right["rves"] ** 2).round(2).map(RVES_CLASSES)
+        t = pd.crosstab(right["model"], reward, normalize="index").mul(100)
+        t = _sorted(t.reindex(columns=list(RVES_CLASSES.values()), fill_value=0), ranks)
+        fig, ax = plt.subplots(figsize=(10, 5))
+        _stacked_shares(ax, t, RVES_COLORS, "Laufzeit Gold / Vorhersage (R-VES-Belohnung)")
+        _style(ax, f"Effizienz der richtigen Antworten ({split}, {which})", "% der richtigen Antworten")
+        save(fig, "rves_rewards")
+
+    # value hints: EX and value-case errors without and with hints, all models
+    for base, hinted in value_hint_pairs(config):
+        if not {base, hinted} <= set(variants):
+            continue
+        pair = df[df["variant"].isin([base, hinted]) & df["exec_acc"].notna()]
+        # only questions answered in both variants (e.g. while one run is still incomplete)
+        both = pair.groupby(["model", "key"])["variant"].transform("nunique") == 2
+        pair = pair[both]
+        if pair.empty:
+            continue
+        g = pair.groupby(["model", "variant"])
+        t = pd.DataFrame({
+            "EX": g["exec_acc"].mean() * 100,
+            "value_case": g["error_group"].apply(lambda x: (x == "Wert: Groß-/Kleinschreibung").mean() * 100),
+        }).unstack("variant")
+        t = _sorted(t, ranks)
+        fig, axes = plt.subplots(1, 2, figsize=(11, 0.45 * len(t.index) + 2), sharey=True)
+        for ax, (col, xlabel) in zip(axes, [("EX", "EX (%)"),
+                                            ("value_case", "Fehler Wert-Schreibweise (% der Fragen)")]):
+            _dumbbell(ax, t[col], base, hinted, (base, hinted))
+            ax.set_xlabel(xlabel, color=TEXT_2)
+        axes[0].legend(frameon=False, labelcolor=TEXT_2, ncols=2, loc="upper left",
+                       bbox_to_anchor=(0, -0.12 - 0.6 / max(len(t.index), 1)))
+        axes[0].set_title(f"Wirkung der Wert-Hinweise ({split}, {pair['key'].nunique()} Fragen in beiden Varianten)",
+                          loc="left", color=TEXT, fontsize=12)
+        save(fig, f"value_hints_{hinted}")
+
+    # train duplicates: EX with and without the questions that also occur in train
+    if best["n_train_dup"].sum() > 0:
+        t = best[["variant", "EX", "EX_excl_train_dup"]].copy()
+        t.index = [f"{mdl} ({r['variant']})" for mdl, r in t.iterrows()]
+        fig, ax = plt.subplots(figsize=(8, 0.45 * len(t.index) + 2))
+        _dumbbell(ax, t, "EX", "EX_excl_train_dup", ("alle Fragen", "ohne Train-Duplikate"))
+        ax.set_xlabel("EX (%)", color=TEXT_2)
+        ax.legend(frameon=False, labelcolor=TEXT_2, ncols=2, loc="upper left",
+                  bbox_to_anchor=(0, -0.12 - 0.6 / max(len(t.index), 1)))
+        n_dup = int(best["n_train_dup"].iloc[0])
+        ax.set_title(f"EX mit und ohne die {n_dup} Fragen, die auch in train stehen\n{split}, {which}",
+                     loc="left", color=TEXT, fontsize=11)
+        save(fig, "ex_train_duplicates")
+
+    # solved by how many models (without contaminated models), stacked by difficulty
+    solved = solved_by_models(config, sel)
+    if len(solved) and solved["n_models"].max() > 1:
+        n_models = int(solved["n_models"].max())
+        t = pd.crosstab(solved["n_models_solved"], solved["spider_hardness"])
+        t = t.reindex(index=range(n_models + 1), fill_value=0)
+        t = t[[c for c in HARDNESS_ORDER if c in t.columns]]
+        fig, ax = plt.subplots(figsize=(9, 4.8))
+        bottom = pd.Series(0, index=t.index)
+        for col, color in zip(t.columns, ["#9cc3e5", "#4a90d0", "#1a5aa0", "#0b2f5a"]):
+            ax.bar(t.index, t[col], bottom=bottom, color=color, label=col, edgecolor=SURFACE, linewidth=1)
+            bottom += t[col]
+        for x, v in bottom.items():
+            ax.annotate(str(v), (x, v), xytext=(0, 3), textcoords="offset points", ha="center",
+                        fontsize=8, color=TEXT_2)
+        ax.set_xticks(list(t.index))
+        ax.set_xlabel("Anzahl Modelle, die die Frage richtig beantworten", color=TEXT_2)
+        ax.legend(frameon=False, labelcolor=TEXT_2, ncols=4, loc="upper left")
+        left_out = [mdl for mdl in config.report.contaminated_models if mdl in set(sel["model"])]
+        note = f", ohne {', '.join(left_out)}" if left_out else ""
+        _style(ax, f"Von wie vielen Modellen gelöst? ({split}, {which}{note})", "Fragen")
+        save(fig, "solved_by_models")
+
 
 def report(config: Config) -> None:
-    df = add_train_duplicates(config, add_error_categories(config, load_per_sample(config)))
+    df = add_gold_tables(config, add_train_duplicates(config, add_error_categories(config, load_per_sample(config))))
     ranks = _ranks(config)
     key = _sort_key(ranks)
     summary = summarize(df).sort_values(["split", "model", "variant"], key=key)
@@ -275,6 +479,10 @@ def report(config: Config) -> None:
         _sorted(acc, ranks).round(2).to_csv(out / "ex_by_spider_hardness.csv")
         _sorted(pd.crosstab([err[k] for k in keys] + [err["spider_hardness"]], err["error_category"]),
                 ranks).to_csv(out / "errors_by_model_spider_hardness.csv")
+
+        best = best_runs(s)[["model", "variant"]]
+        solved_by_models(config, d.merge(best, on=["model", "variant"])).to_csv(
+            out / "solved_by_models.csv", index=False)
 
         plot_split(config, split, d, s, out / "figures")
         logger.success(f"Report for {split} written to {out}")

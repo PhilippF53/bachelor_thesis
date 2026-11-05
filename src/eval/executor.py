@@ -1,4 +1,4 @@
-"""EX and EM for single samples, reusing the NL2SQL360 Spider components.
+"""EX, EM and soft F1 for single samples, reusing the NL2SQL360 Spider/BIRD components.
 
 Differences to `SpiderEXEMEvaluator`: DISTINCT is kept, the timeout is enforced
 (DBService), failing gold queries are reported instead of asserting, and Spider parse
@@ -17,6 +17,7 @@ from nl2sql360.evaluator.test_suite_sql_eval.evaluation import (
 from nl2sql360.evaluator.test_suite_sql_eval.exec_eval import postprocess, result_eq
 
 from src.eval.hardness import load_spider_schema, parse_spider_sql
+from src.eval.metrics import soft_f1
 from src.services.database_service import DBService, ExecResult
 
 
@@ -24,6 +25,7 @@ from src.services.database_service import DBService, ExecResult
 class SampleScore:
     exec_acc: int | None  # None: gold not executable, sample excluded
     exact_acc: int | None  # None: gold not parseable by the Spider parser
+    f1: float | None  # BIRD soft F1 of the results; None: gold not executable
     pred_ok: bool
     pred_error: str | None
     pred_row_count: int | None
@@ -64,15 +66,17 @@ class SampleEvaluator:
         pred = pred or ""
         pred_res = self.db.execute_sql(postprocess(pred)) if pred else ExecResult(False, None, "no sql", 0.0)
         if not gold_res.ok:
-            exec_acc = None
+            exec_acc, f1 = None, None
         elif not pred_res.ok:
-            exec_acc = 0
+            exec_acc, f1 = 0, 0.0
         else:
             exec_acc = int(result_eq(gold_res.rows, pred_res.rows, order_matters="order by" in gold.lower()))
+            f1 = soft_f1(pred_res.rows, gold_res.rows)
         exact_acc, g_err, p_err = self.exact_match(pred, gold)
         return SampleScore(
             exec_acc=exec_acc,
             exact_acc=exact_acc,
+            f1=round(f1, 4) if f1 is not None else None,
             pred_ok=pred_res.ok,
             pred_error=pred_res.error,
             pred_row_count=pred_res.row_count,

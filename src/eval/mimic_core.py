@@ -2,6 +2,7 @@
 
 Results go into the regular NL2SQL360 evaluation tables (so leaderboards, filters and
 scenarios keep working) plus a per-sample CSV with latency, tokens and diagnostics.
+Metrics: EX, EM, soft F1 (src/eval/executor.py) and VES/R-VES (src/eval/efficiency.py).
 """
 
 import json
@@ -14,11 +15,14 @@ from loguru import logger
 from nl2sql360.arguments import CoreArguments
 from nl2sql360.core import Core
 from nl2sql360.database import Base, get_evaluation_model
+from nl2sql360.evaluator.test_suite_sql_eval.exec_eval import postprocess
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from src.config import Config
+from src.eval.efficiency import EfficiencyCache, EfficiencyMeter, measurement_hash
 from src.eval.executor import SampleEvaluator
+from src.eval.metrics import rves_score, ves_score
 from src.eval.nl2sql360_tables import drop_evaluation
 from src.inference.extract import extract_sql
 from src.inference.runner import load_records, load_samples
@@ -86,8 +90,10 @@ class MimicCore(Core):
                 "output_truncated": rec["output_truncated"],
                 "spider_hardness": s["spider_hardness"],
             })
-        df = pd.DataFrame(rows)
         out = results_dir(self.config, split, model, variant)
+        gold_by_key = {s["key"]: s["sql"] for s in samples}
+        self.add_efficiency(rows, gold_by_key, out / "efficiency.csv", f"{model}/{variant}")
+        df = pd.DataFrame(rows)
         out.mkdir(parents=True, exist_ok=True)
         df.to_csv(out / "per_sample.csv", index=False)
 
@@ -104,7 +110,43 @@ class MimicCore(Core):
         with Session(self.engine) as session:
             for r in rows:
                 session.add(model_cls(id=r["id"], pred=r["pred_sql"] or "", exec_acc=r["exec_acc"],
-                                      exact_acc=r["exact_acc"]))
+                                      exact_acc=r["exact_acc"], f1=r["f1"], ves=r["ves"], rves=r["rves"]))
             session.commit()
-        logger.success(f"{table_name}: EX={df['exec_acc'].mean():.3f} EM={df['exact_acc'].mean():.3f}")
+        logger.success(f"{table_name}: EX={df['exec_acc'].mean():.3f} EM={df['exact_acc'].mean():.3f} "
+                       f"F1={df['f1'].mean():.3f} VES={df['ves'].mean():.3f} R-VES={df['rves'].mean():.3f}")
         return df
+
+    def add_efficiency(self, rows: list[dict], gold_by_key: dict[str, str], cache_path: Path,
+                       label: str) -> None:
+        """Adds time_ratio, ves and rves to every row: None if the gold SQL is not
+        executable (as EX) or the measurement is off, 0 for wrong predictions."""
+        iterations = self.config.evaluation.ves_iterations
+        if iterations <= 0:
+            for r in rows:
+                r.update(time_ratio=None, ves=None, rves=None)
+            return
+        meter = EfficiencyMeter(self.config.db_path, self.config.execution.timeout_s, iterations)
+        cache = EfficiencyCache(cache_path)
+        todo = []
+        for r in rows:
+            if r["exec_acc"] != 1:
+                continue
+            pred, gold = postprocess(r["pred_sql"]), postprocess(gold_by_key[r["key"]])
+            h = measurement_hash(pred, gold, iterations)
+            r["time_ratio"] = cache.get(r["key"], h)
+            if r["time_ratio"] is None:
+                todo.append((r, pred, gold, h))
+        for r, pred, gold, h in tqdm(todo, desc=f"VES {label}", disable=not todo):
+            r["time_ratio"] = meter.time_ratio(pred, gold)
+            cache.put(r["key"], h, r["time_ratio"])
+        cache.save({r["key"] for r in rows if r["exec_acc"] == 1})
+        if todo:
+            logger.info(f"{label}: timed {len(todo)} correct predictions ({iterations} iterations each)")
+        for r in rows:
+            if r["exec_acc"] is None:
+                r.update(time_ratio=None, ves=None, rves=None)
+            elif r["exec_acc"] == 0:
+                r.update(time_ratio=0.0, ves=0.0, rves=0.0)
+            else:
+                r.update(time_ratio=round(r["time_ratio"], 4), ves=round(ves_score(r["time_ratio"]), 4),
+                         rves=round(rves_score(r["time_ratio"]), 4))

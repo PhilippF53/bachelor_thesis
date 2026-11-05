@@ -29,3 +29,14 @@ def test_missing_prediction_is_wrong_but_no_parse_error(tmp_path):
         evaluator.close()
     assert (missing.exec_acc, missing.exact_acc, missing.em_parse_error_pred) == (0, 0, None)
     assert (correct.exec_acc, correct.exact_acc, correct.em_parse_error_pred) == (1, 1, None)
+
+
+def test_f1_for_correct_wrong_and_failed_predictions(tmp_path):
+    evaluator = _evaluator(tmp_path)
+    try:
+        correct = evaluator.score("SELECT COUNT(DISTINCT SUBJECT_ID) FROM LAB WHERE LABEL = 'a'", GOLD)
+        wrong = evaluator.score("SELECT COUNT(*) FROM LAB", GOLD)
+        failed = evaluator.score("SELECT nope FROM LAB", GOLD)
+    finally:
+        evaluator.close()
+    assert (correct.f1, wrong.f1, failed.f1) == (1.0, 0.0, 0.0)
