@@ -44,7 +44,7 @@ variants:
 
 selection:
   dev_variants: [zero_shot, few_random_k3, few_similar_k3, few_similar_k3_values]
-  test_variant: null  # set after comparing variants on dev
+  test_variant: few_similar_k3_values
 
 # ordered small -> large; `think` is fixed per model, reasoning goes to a separate field
 models:
