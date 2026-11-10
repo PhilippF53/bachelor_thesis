@@ -4,6 +4,11 @@ from dataclasses import asdict, dataclass
 import ollama
 
 _NS = 1e9
+# Ollama aborts degenerate generations (endless token repetition) with HTTP 500 and this
+# message. With temperature 0 and a fixed seed a retry gives the same result, so the
+# answer is stored as empty with done_reason "repeat_limit" instead of failing the run.
+_REPEAT_LIMIT = "token repeat limit reached"
+REPEAT_LIMIT_REASON = "repeat_limit"
 
 
 @dataclass
@@ -49,17 +54,34 @@ class OllamaService:
             done_reason=response.done_reason,
         )
 
+    @staticmethod
+    def _repeat_limit(wall_s: float) -> LLMResponse:
+        return LLMResponse(content="", thinking=None, prompt_tokens=None, output_tokens=None,
+                           wall_s=wall_s, total_duration_s=None, load_duration_s=None,
+                           prompt_eval_duration_s=None, eval_duration_s=None,
+                           done_reason=REPEAT_LIMIT_REASON)
+
     def chat(self, messages: list[dict]) -> LLMResponse:
         start = time.perf_counter()
-        response = self.client.chat(model=self.model_name, messages=messages, think=self.think,
-                                    options=self.options, keep_alive=self.keep_alive)
+        try:
+            response = self.client.chat(model=self.model_name, messages=messages, think=self.think,
+                                        options=self.options, keep_alive=self.keep_alive)
+        except ollama.ResponseError as e:
+            if _REPEAT_LIMIT not in str(e):
+                raise
+            return self._repeat_limit(time.perf_counter() - start)
         wall = time.perf_counter() - start
         return self._wrap(response, response.message.content or "", response.message.thinking, wall)
 
     def generate_raw(self, prompt: str) -> LLMResponse:
         start = time.perf_counter()
-        response = self.client.generate(model=self.model_name, prompt=prompt, raw=True,
-                                        options=self.options, keep_alive=self.keep_alive)
+        try:
+            response = self.client.generate(model=self.model_name, prompt=prompt, raw=True,
+                                            options=self.options, keep_alive=self.keep_alive)
+        except ollama.ResponseError as e:
+            if _REPEAT_LIMIT not in str(e):
+                raise
+            return self._repeat_limit(time.perf_counter() - start)
         wall = time.perf_counter() - start
         return self._wrap(response, response.response or "", response.thinking, wall)
 

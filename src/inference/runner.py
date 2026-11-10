@@ -25,7 +25,7 @@ from src.inference.fewshot import FewShotSelector
 from src.inference.formats import RenderedPrompt, render
 from src.inference.prompts import Example, build_content, build_schema_text
 from src.inference.values import ValueMatcher
-from src.services.ollama_service import LLMResponse, OllamaService
+from src.services.ollama_service import REPEAT_LIMIT_REASON, LLMResponse, OllamaService
 
 NO_SQL = "NO_SQL_EXTRACTED"
 
@@ -254,6 +254,13 @@ class InferenceRunner:
             start = time.perf_counter()
             longest = max(samples, key=lambda s: len(self.render(s)[0].as_text()))
             warmup = self.call(self.render(longest)[0])
+            if warmup.done_reason == REPEAT_LIMIT_REASON:
+                # no token counts in an aborted answer; fall back to the next longest prompt
+                logger.warning(f"{name}: warm-up hit the token repeat limit, retrying with "
+                               "another prompt for the context check")
+                longest = max((s for s in samples if s is not longest),
+                              key=lambda s: len(self.render(s)[0].as_text()))
+                warmup = self.call(self.render(longest)[0])
             self._check_context(warmup)
             gpu = self._gpu_placement()
             logger.info(f"{name}: ready after {time.perf_counter() - start:.1f}s "
@@ -263,7 +270,7 @@ class InferenceRunner:
                 logger.warning(f"{self.model.tag} is partially offloaded to CPU: {gpu}")
             self._write_manifest(manifest, settings, gpu)
 
-        latencies, out_tokens, no_sql, truncated = [], [], 0, 0
+        latencies, out_tokens, no_sql, truncated, repeat_limit = [], [], 0, 0, 0
         bar = tqdm(todo, desc=f"{label}{self.model.name}/{self.variant.name}", position=1, leave=False,
                    dynamic_ncols=True)
         with open(raw_path, "a", encoding="utf-8") as f:
@@ -290,6 +297,10 @@ class InferenceRunner:
                 out_tokens.append(resp.output_tokens or 0)
                 no_sql += sql is None
                 truncated += flags["output_truncated"]
+                if resp.done_reason == REPEAT_LIMIT_REASON:
+                    repeat_limit += 1
+                    logger.warning(f"{name}: id {sample['id']} aborted by Ollama (token repeat "
+                                   "limit), stored without SQL")
                 bar.set_postfix(lat=f"{sum(latencies) / len(latencies):.1f}s",
                                 tok=f"{sum(out_tokens) / len(out_tokens):.0f}", no_sql=no_sql)
                 if overall is not None:
@@ -298,7 +309,8 @@ class InferenceRunner:
         if latencies:
             logger.info(f"{name}: finished {len(latencies)} answers, mean latency "
                         f"{sum(latencies) / len(latencies):.2f}s, mean output tokens "
-                        f"{sum(out_tokens) / len(out_tokens):.0f}, no SQL {no_sql}, truncated {truncated}")
+                        f"{sum(out_tokens) / len(out_tokens):.0f}, no SQL {no_sql}, truncated {truncated}, "
+                        f"repeat limit {repeat_limit}")
 
         write_predictions(self.dir, samples, load_records(raw_path))
         return self.dir
