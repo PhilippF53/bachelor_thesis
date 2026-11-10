@@ -6,6 +6,7 @@ _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _CODE_BLOCK = re.compile(r"```[ \t]*[a-zA-Z]*[ \t]*\n?(.*?)```", re.DOTALL)
 _OPEN_CODE_BLOCK = re.compile(r"```[ \t]*[a-zA-Z]*[ \t]*\n?(.*)$", re.DOTALL)
 _SQL_TAG = re.compile(r"\[SQL\](.*?)(?:\[/SQL\]|$)", re.DOTALL | re.IGNORECASE)
+_SQL_TAGS = re.compile(r"\[/?SQL\]", re.IGNORECASE)
 _SQL_START = re.compile(r"\b(SELECT|WITH)\b", re.IGNORECASE)
 # in free text the prose words "select"/"with" are lower case, SQL keywords usually not
 _SQL_START_UPPER = re.compile(r"\b(SELECT|WITH)\b")
@@ -95,13 +96,15 @@ def extract_sql(response: str) -> tuple[str | None, str]:
 
     if "```" in text and (block := _from_code_blocks(text)) is not None:
         candidate, method = _strip_comments(block), "code_block"
-    elif m := _SQL_TAG.search(text):
+    elif (m := _SQL_TAG.search(text)) and _SQL_START.search(m.group(1)):
         candidate, method = _strip_comments(m.group(1)), "sql_tag"
     else:
-        # free text may use "--" as a dash; comments are removed only after the SQL start
+        # free text may use "--" as a dash; comments are removed only after the SQL start.
+        # An empty [SQL] tag also lands here: the SQLCoder prompt ends with "[SQL]", and
+        # sqlcoder-7b often answers with the query followed by another opening "[SQL]".
         candidate, method = text.replace("```", ""), "plain"
 
-    candidate = _LABEL_PREFIX.sub("", candidate.replace("[/SQL]", ""))
+    candidate = _LABEL_PREFIX.sub("", _SQL_TAGS.sub("", candidate))
     start = _sql_start(candidate, prose=method == "plain")
     if start is None:
         return None, "no_sql"
