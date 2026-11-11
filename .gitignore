@@ -14,7 +14,9 @@ wheels/
 # Directories
 /data/
 /runs/
-/results/
+/results/*/runs/
+/results/_archive/
+/results/*/all_samples.csv
 
 # Files
 todo
