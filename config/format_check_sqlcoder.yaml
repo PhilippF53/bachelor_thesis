@@ -1,0 +1,59 @@
+# Format check for SQLCoder: both prompt layouts (src/inference/formats.py) for both Ollama
+# tags on the first 100 dev questions. Settings as in config.yaml, but with its own run and
+# result folders, so the check never mixes with the benchmark runs.
+#
+#   uv run python -m src.cli --config config/format_check_sqlcoder.yaml infer --split dev --limit 100
+#   uv run python -m src.cli --config config/format_check_sqlcoder.yaml evaluate --split dev
+#   uv run python -m src.cli --config config/format_check_sqlcoder.yaml report
+paths:
+  source_db: data/mimic.db
+  mimicsql_dir: data/mimicsql/MimicSQL2
+  treqs_dir: data/mimicsql/TREQS/evaluation
+  derived_dir: data/derived
+  nl2sql360_dir: data/derived/nl2sql360
+  runs_dir: runs/_format_check
+  results_dir: results/_format_check
+  docs_dir: docs
+
+dataset:
+  name: mimicsql
+  db_id: mimicsql
+  question_key: question_refine
+  splits: [train, dev, test]
+  eval_splits: [dev, test]
+
+execution:
+  timeout_s: 30
+
+evaluation:
+  # no runtime measurement needed here
+  ves_iterations: 0
+
+report:
+  contaminated_models: []
+
+inference:
+  seed: 42
+  temperature: 0
+  num_ctx: 8192
+  num_predict: 1024
+  keep_alive: 30m
+
+variants:
+  zero_shot: {k: 0}
+  few_similar_k3_values: {k: 3, strategy: similar, values: true}
+
+selection:
+  dev_variants: [zero_shot, few_similar_k3_values]
+  test_variant: null
+
+# v1: defog/sqlcoder (prompt.md of 2023-08-18), v2: defog/sqlcoder-7b and sqlcoder2 (2023-10-04)
+models:
+  - {name: sqlcoder-7b-v1, tag: "sqlcoder:7b", format: sqlcoder_v1,
+     extra_options: {stop: ["```", "<|endoftext|>"]}}
+  - {name: sqlcoder-7b-v2, tag: "sqlcoder:7b", format: sqlcoder_v2,
+     extra_options: {stop: ["```", "<|endoftext|>"]}}
+  - {name: sqlcoder-15b-v1, tag: "sqlcoder:15b", format: sqlcoder_v1,
+     extra_options: {stop: ["```", "<|endoftext|>"]}}
+  - {name: sqlcoder-15b-v2, tag: "sqlcoder:15b", format: sqlcoder_v2,
+     extra_options: {stop: ["```", "<|endoftext|>"]}}

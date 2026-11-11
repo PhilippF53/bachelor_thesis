@@ -34,6 +34,20 @@ class ContextOverflowError(RuntimeError):
     pass
 
 
+def check_loaded_context(tag: str, num_ctx: int, loaded_ctx: int | None) -> None:
+    """Stop if Ollama loaded the model with a smaller context than configured.
+
+    Ollama caps num_ctx at the context length of the model without an error (2048 tokens for
+    codellama:70b-instruct). The prompt check would then compare against a context the model
+    does not have, so the config has to name the real value.
+    """
+    if loaded_ctx is not None and loaded_ctx < num_ctx:
+        raise ContextOverflowError(
+            f"{tag} is loaded with a context of {loaded_ctx} tokens, but num_ctx is {num_ctx}; "
+            "set num_ctx (and a fitting num_predict) for this model in the config"
+        )
+
+
 def run_dir(config: Config, split: str, model: ModelConfig, variant: VariantConfig) -> Path:
     return config.paths.runs_dir / split / model.name / variant.name
 
@@ -204,7 +218,7 @@ class InferenceRunner:
             raise RuntimeError(f"{manifest_path}: model digest changed since the run started")
         return manifest
 
-    def _write_manifest(self, manifest: dict | None, settings: dict, gpu: dict) -> None:
+    def _write_manifest(self, manifest: dict | None, settings: dict, loaded: dict) -> None:
         manifest_path = self.dir / "manifest.json"
         if manifest is not None:
             manifest.setdefault("resumed", []).append(datetime.now().isoformat(timespec="seconds"))
@@ -217,14 +231,16 @@ class InferenceRunner:
                 "model_info": self.llm.model_info(),
                 "ollama_version": OllamaService.server_version(),
                 "git": _git_state(),
-                "gpu": gpu,
+                "gpu": loaded,
             }
         manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
 
-    def _gpu_placement(self) -> dict:
+    def _loaded_model(self) -> dict:
+        """Size, GPU placement and context length of the loaded model as `ollama ps` reports them."""
         for m in self.llm.client.ps().models:
             if m.model == self.model.tag:
-                return {"size": m.size, "size_vram": m.size_vram, "fully_on_gpu": m.size_vram >= m.size}
+                return {"size": m.size, "size_vram": m.size_vram, "fully_on_gpu": m.size_vram >= m.size,
+                        "context_length": m.context_length}
         return {}
 
     def pending(self, limit: int | None = None) -> tuple[list[dict], list[dict]]:
@@ -247,7 +263,8 @@ class InferenceRunner:
 
         if todo:
             # warm-up with the longest prompt: loads the model (load time stays out of the
-            # latency numbers) and checks that no prompt gets truncated by num_ctx
+            # latency numbers) and checks that Ollama loaded it with the configured context
+            # and that no prompt gets truncated by num_ctx
             settings = _settings(self.config, self.model, self.variant, self.schema)
             manifest = self._resumed_manifest(settings)  # fails before loading the model
             logger.info(f"{name}: warm-up ({self.model.tag}, loads the model if needed)")
@@ -261,14 +278,19 @@ class InferenceRunner:
                 longest = max((s for s in samples if s is not longest),
                               key=lambda s: len(self.render(s)[0].as_text()))
                 warmup = self.call(self.render(longest)[0])
+            loaded = self._loaded_model()
+            if not loaded:
+                logger.warning(f"{self.model.tag} is not listed by `ollama ps`: loaded context and GPU "
+                               "placement could not be checked")
+            check_loaded_context(self.model.tag, self.options["num_ctx"], loaded.get("context_length"))
             self._check_context(warmup)
-            gpu = self._gpu_placement()
             logger.info(f"{name}: ready after {time.perf_counter() - start:.1f}s "
                         f"(load {warmup.load_duration_s or 0:.1f}s, longest prompt {warmup.prompt_tokens} "
-                        f"tokens, num_ctx {self.options['num_ctx']}, on GPU: {gpu.get('fully_on_gpu')})")
-            if gpu and not gpu["fully_on_gpu"]:
-                logger.warning(f"{self.model.tag} is partially offloaded to CPU: {gpu}")
-            self._write_manifest(manifest, settings, gpu)
+                        f"tokens, num_ctx {self.options['num_ctx']}, loaded context "
+                        f"{loaded.get('context_length')}, on GPU: {loaded.get('fully_on_gpu')})")
+            if loaded and not loaded["fully_on_gpu"]:
+                logger.warning(f"{self.model.tag} is partially offloaded to CPU: {loaded}")
+            self._write_manifest(manifest, settings, loaded)
 
         latencies, out_tokens, no_sql, truncated, repeat_limit = [], [], 0, 0, 0
         bar = tqdm(todo, desc=f"{label}{self.model.name}/{self.variant.name}", position=1, leave=False,

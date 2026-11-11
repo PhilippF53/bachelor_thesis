@@ -77,9 +77,9 @@ jedes Modells.
 |---|---|---|---|---|
 | `duckdb-nsql-7b` | `duckdb-nsql:latest` | 3.8 GB | DuckDB-NSQL (raw) | – |
 | `codellama-7b` | `codellama:7b-instruct` | 3.8 GB | Chat | – |
-| `sqlcoder-7b` | `sqlcoder:7b` | 4.1 GB | SQLCoder (raw) | – |
+| `sqlcoder-7b` | `sqlcoder:7b` | 4.1 GB | SQLCoder v2 (raw) | – |
 | `codellama-13b` | `codellama:13b-instruct` | 7.4 GB | Chat | – |
-| `sqlcoder-15b` | `sqlcoder:15b` | 9.0 GB | SQLCoder (raw) | – |
+| `sqlcoder-15b` | `sqlcoder:15b` | 9.0 GB | SQLCoder v1 (raw) | – |
 | `gpt-oss-20b` | `gpt-oss:20b` | 13.8 GB | Chat | `medium` |
 | `qwen3-coder-30b` | `qwen3-coder:30b` (30.5B MoE) | 18 GB | Chat | – |
 | `codellama-34b` | `codellama:34b-instruct` | 19.1 GB | Chat | – |
@@ -104,12 +104,13 @@ alle erzeugten Tokens).
 | Pfad | Inhalt |
 |---|---|
 | `config/config.yaml` | Pfade, Modelle, Prompt-Varianten, Seeds, Timeout |
+| `config/format_check_sqlcoder.yaml` | Format-Check für SQLCoder: beide Prompt-Layouts für beide Tags auf den ersten 100 dev-Fragen, mit eigenen Lauf- und Ergebnisordnern (`runs/_format_check`, `results/_format_check`) |
 | `src/cli.py` | Einstieg für alle Schritte |
 | `src/data/` | DB-Nachbau (TREQS), Datensatz-Konvertierung, Gold-Prüfung |
 | `src/inference/` | Prompt-Inhalt, modellspezifische Formate, Few-Shot-Auswahl, SQL-Extraktion, Runner |
 | `src/eval/` | EX/EM pro Beispiel, `MimicCore` (NL2SQL360-Erweiterung), Schwierigkeitsgrade |
 | `src/analysis/` | Fehlerkategorien, Zusammenfassung, Diagramme |
-| `runs/<split>/<model>/<variant>/` | `manifest.json` (Config-Snapshot, Einstellungen, Zeitstempel, Tag und Digest, Ollama-Version, Git-Commit, GPU-Platzierung), `raw.jsonl` (Prompt, Rohausgabe, Denk-Ausgabe getrennt, extrahierte SQL, Timings, Tokens), `predictions.sql` |
+| `runs/<split>/<model>/<variant>/` | `manifest.json` (Config-Snapshot, Einstellungen, Zeitstempel, Tag und Digest, Ollama-Version, Git-Commit, GPU-Platzierung und geladene Kontextlänge), `raw.jsonl` (Prompt, Rohausgabe, Denk-Ausgabe getrennt, extrahierte SQL, Timings, Tokens), `predictions.sql` |
 | `results/<split>/` | je Split (`train`, `dev`, `test`): `gold_check.csv`; für dev und test zusätzlich `runs/<model>/<variant>/per_sample.csv` und `efficiency.csv` (VES-Cache), `summary.csv/json`, `all_samples.csv`, Fehlertabellen, `solved_by_models.csv`, `figures/` (Liste der Diagramme in `docs/architektur.md`). train enthält nur die Gold-Prüfung, weil darauf keine Modelle laufen (Beispielpool für Few-Shot). |
 | `docs/gold_check.md` | Bericht zur Gold-SQL-Prüfung |
 | `data/derived/` | nachgebaute DB, konvertierte Splits, `tables.json`, NL2SQL360-Datenbank |
@@ -178,9 +179,27 @@ alle erzeugten Tokens).
   Leaderboards und Filter funktionieren dort also wie gewohnt.
 - **Prompts:** Alle Modelle bekommen denselben Inhalt: Schema mit Spaltenbeschreibungen,
   Anweisung mit ausdrücklichem SQLite-Hinweis, k Beispiele aus train. SQLCoder und
-  DuckDB-NSQL erhalten ihn in ihrem trainierten Format (raw). Gesetzt sind
-  `temperature=0`, `seed=42` und `num_ctx` explizit. Ist ein Prompt zu lang für
-  `num_ctx`, bricht der Lauf ab.
+  DuckDB-NSQL erhalten ihn im Layout, auf das sie trainiert wurden (raw). Gesetzt sind
+  `temperature=0`, `seed=42` und `num_ctx` explizit.
+- **SQLCoder:** Die Ollama-Tags sind ältere Checkpoints mit je eigenem Prompt-Layout.
+  `sqlcoder:7b` ist nach Parameterzahl und Kontextlänge das Mistral-basierte
+  `defog/sqlcoder-7b` (Layout `sqlcoder_v2`, Defogs `prompt.md` vom 4.10.2023).
+  `sqlcoder:15b` ist laut Ollama-Seite `defog/sqlcoder` (Layout `sqlcoder_v1`, `prompt.md`
+  vom 18.8.2023). Beide Prompts enden mit einem geöffneten SQL-Codeblock, und die
+  Generierung stoppt wie in Defogs `inference.py` am schließenden Zaun (`stop` in der
+  Config). Abweichungen von Defogs Referenz: Greedy-Dekodierung statt Beam Search mit
+  5 Beams (in Ollama nicht verfügbar), SQLite statt Postgres, dazu unsere Anweisung, Regeln
+  und Beispiele.
+- **Kontextlänge:** Passt ein Prompt samt `num_predict` nicht in `num_ctx`, bricht der
+  Lauf ab. Ollama kürzt ein `num_ctx` oberhalb der Kontextlänge des Modells ohne
+  Fehlermeldung. `infer` vergleicht deshalb nach dem Laden die tatsächlich geladene
+  Kontextlänge (`ollama ps`) mit `num_ctx` und bricht ab, wenn sie kleiner ist. Das
+  betrifft `codellama:70b-instruct` mit 2048 Tokens; dort gelten `num_ctx: 2048` und
+  `num_predict: 400`. Die dev-Läufe dieses Modells liefen noch mit angeforderten 8192,
+  also effektiv 2048 Tokens, und `num_predict: 1024`. Von den 3184 Antworten erreichte eine
+  die Kontextgrenze (`few_similar_k3_values`, 1024 Ausgabe-Tokens, fünfmal derselbe
+  SQL-Block); die extrahierte SQL entspricht dem ersten Block. Drei Antworten waren länger
+  als 400 Tokens, bei allen steht der vollständige SQL-Block in den ersten rund 300 Tokens.
 - **Varianten:** zero-shot, few-shot k=3 zufällig (Seed pro Frage, für alle Modelle
   gleich), few-shot k=3 ähnlichkeitsbasiert (TF-IDF) und dieselbe Variante mit
   Wert-Hinweisen (`few_similar_k3_values`). Verglichen wird auf dev, test nur für den
@@ -209,5 +228,12 @@ alle erzeugten Tokens).
   und die richtige Schreibweise der DB-Werte, die nicht im Prompt stehen. Die Ergebnisse
   dieses Modells sind deshalb nicht mit denen der anderen Modelle vergleichbar. Im
   Diagramm „von wie vielen Modellen gelöst“ fehlt es (`report.contaminated_models`).
+- **Verweigerungen bei CodeLlama-70b:** `codellama:70b-instruct` beantwortet einen Teil der
+  Fragen nicht mit SQL, sondern lehnt sie ab oder bittet um Klärung, meist mit „The question
+  is not clear“ oder „The question is not specific enough“. Diese Antworten enthalten keine
+  SQL. Sie zählen als falsch (EX = 0) und stehen in `summary.csv` in der Spalte `no_sql`
+  sowie in der Fehleranalyse in der Kategorie `no_sql`; die Antworttexte stehen in
+  `raw.jsonl` (`content`). Das ist Verhalten des Modells, kein Fehler der SQL-Extraktion.
+  Die kleineren CodeLlama-Modelle (7b, 13b, 34b) zeigen es in keinem dev-Lauf.
 - **Datenschutz:** Abfrageergebnisse werden nur im Speicher verglichen. Gespeichert
   werden korrekt/falsch, Soft-F1-Wert, Zeilenanzahl, Fehlermeldung und Laufzeiten.

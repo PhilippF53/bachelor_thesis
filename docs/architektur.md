@@ -61,8 +61,13 @@ cli ─▶ config
 | `models` | Liste von Modellen, klein nach groß; Reihenfolge bestimmt die Laufreihenfolge |
 
 Felder pro Modell: `name` (Ordnername und Schlüssel in der CLI), `tag` (Ollama-Tag),
-`format` (`chat`, `sqlcoder`, `duckdb_nsql`), optional `think`, `num_ctx`, `num_predict`
-und `extra_options` (weitere Ollama-Optionen, z.B. `num_batch` als Workaround).
+`format` (`chat`, `sqlcoder_v1`, `sqlcoder_v2`, `duckdb_nsql`), optional `think`, `num_ctx`,
+`num_predict` und `extra_options` (weitere Ollama-Optionen, z.B. `num_batch` als Workaround
+oder `stop` für die SQLCoder-Formate).
+
+`config/format_check_sqlcoder.yaml` ist eine zweite, vollständige Config nur für den
+Format-Check von SQLCoder (über `--config`); sie schreibt nach `runs/_format_check` und
+`results/_format_check`.
 
 Die Reihenfolge von Modellen und Varianten in der Config bestimmt auch die Reihenfolge in
 allen Tabellen und Diagrammen.
@@ -215,10 +220,13 @@ Ablauf von `run(limit, overall, label)`:
    Bei einer Abweichung wirft es einen Fehler, bevor das Modell geladen wird. Manifesten
    ohne Prompt-Hash wird der aktuelle Hash ergänzt.
 4. **Warm-up:** ein Aufruf mit dem längsten Prompt des Splits. Er lädt das Modell (die
-   Ladezeit fällt so nicht in die gemessene Latenz), `_check_context` prüft
-   `prompt_tokens + num_predict ≤ num_ctx`, und `_gpu_placement` liest über `ollama ps`,
-   ob das Modell vollständig im VRAM liegt (sonst Warnung). Danach wird das Manifest
-   geschrieben (neu, mit Config-Snapshot) bzw. um einen `resumed`-Zeitstempel ergänzt.
+   Ladezeit fällt so nicht in die gemessene Latenz). `_loaded_model` liest danach über
+   `ollama ps`, ob das Modell vollständig im VRAM liegt (sonst Warnung) und mit welcher
+   Kontextlänge es geladen ist. `check_loaded_context` bricht ab, wenn diese kleiner ist
+   als `num_ctx`: Ollama kürzt ein `num_ctx` oberhalb der Kontextlänge des Modells ohne
+   Fehlermeldung (`codellama:70b-instruct`: 2048 Tokens). `_check_context` prüft
+   `prompt_tokens + num_predict ≤ num_ctx`. Danach wird das Manifest geschrieben (neu, mit
+   Config-Snapshot) bzw. um einen `resumed`-Zeitstempel ergänzt.
 5. **Hauptschleife:** pro offener Frage `render()` → `call()` → `_check_context()` →
    `extract_sql()` → Datensatz an `raw.jsonl` anhängen und sofort `flush()`. Bei einem
    Abbruch geht höchstens die laufende Frage verloren.
@@ -278,8 +286,15 @@ Rendert einen `PromptContent` in das Format des Modells (`RENDERERS`, ausgewähl
 | Format | Modus | Aufbau |
 |---|---|---|
 | `chat` | Chat-API | System: Instruktion + Regeln; User: Schema (+ Wert-Hinweise), Beispiele, `Question: … SQL:` |
-| `sqlcoder` | raw | `### Task` / `### Instructions` / `### Database Schema` / `### Examples` / `### Answer … [SQL]` |
+| `sqlcoder_v1` | raw | `### Instructions:` (Anweisung, Regeln) / `### Input:` (Frage, Schema, `Examples`) / `### Response:`, endet mit einem geöffneten SQL-Codeblock. Layout von `defog/sqlcoder` (Ollama-Tag `sqlcoder:15b`) |
+| `sqlcoder_v2` | raw | `### Task` / `### Instructions` / `### Database Schema` / `### Examples` / `### SQL`, endet mit einem geöffneten SQL-Codeblock. Layout von `defog/sqlcoder-7b` (Ollama-Tag `sqlcoder:7b`) und `sqlcoder2` |
 | `duckdb_nsql` | raw | `### Instruction` / `### Input` / `Examples` / `### Question` / `### Response`, mit SQLite als Zieldialekt |
+
+Bei den beiden SQLCoder-Formaten endet die Antwort am schließenden Zaun des Codeblocks.
+Modelle mit diesen Formaten brauchen deshalb die drei Backticks als Stop-Sequenz
+(`extra_options: {stop: […]}` in der Config, wie in Defogs `inference.py`). Ohne sie
+schreibt das Modell hinter dem Zaun weiter, und die Extraktion könnte diesen Text als
+Antwort nehmen. `tests/test_prompts.py` prüft das für alle Configs.
 
 `RenderedPrompt.as_text()` liefert eine flache Textfassung, die in `raw.jsonl` gespeichert
 und für den Vorlagen-Hash und die Resume-Prüfung verwendet wird.
@@ -507,7 +522,7 @@ Literal (so interpretiert SQLite sie auch).
 | `model_info` | Ausgabe von `OllamaService.model_info()` inkl. `digest` |
 | `ollama_version` | Version des Ollama-Servers |
 | `git` | `commit`, `dirty` |
-| `gpu` | `size`, `size_vram`, `fully_on_gpu` |
+| `gpu` | Angaben von `ollama ps` zum geladenen Modell: `size`, `size_vram`, `fully_on_gpu`, `context_length` (geladene Kontextlänge; ältere Manifeste haben das Feld nicht) |
 
 ### `runs/<split>/<model>/<variant>/raw.jsonl`
 
