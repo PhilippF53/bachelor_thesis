@@ -77,9 +77,9 @@ jedes Modells.
 |---|---|---|---|---|
 | `duckdb-nsql-7b` | `duckdb-nsql:latest` | 3.8 GB | DuckDB-NSQL (raw) | – |
 | `codellama-7b` | `codellama:7b-instruct` | 3.8 GB | Chat | – |
-| `sqlcoder-7b` | `sqlcoder:7b` | 4.1 GB | SQLCoder v2 (raw) | – |
+| `sqlcoder-7b` | `sqlcoder:7b` | 4.1 GB | SQLCoder (raw) | – |
 | `codellama-13b` | `codellama:13b-instruct` | 7.4 GB | Chat | – |
-| `sqlcoder-15b` | `sqlcoder:15b` | 9.0 GB | SQLCoder v1 (raw) | – |
+| `sqlcoder-15b` | `sqlcoder:15b` | 9.0 GB | SQLCoder (raw) | – |
 | `gpt-oss-20b` | `gpt-oss:20b` | 13.8 GB | Chat | `medium` |
 | `qwen3-coder-30b` | `qwen3-coder:30b` (30.5B MoE) | 18 GB | Chat | – |
 | `codellama-34b` | `codellama:34b-instruct` | 19.1 GB | Chat | – |
@@ -104,7 +104,6 @@ alle erzeugten Tokens).
 | Pfad | Inhalt |
 |---|---|
 | `config/config.yaml` | Pfade, Modelle, Prompt-Varianten, Seeds, Timeout |
-| `config/format_check_sqlcoder.yaml` | Format-Check für SQLCoder: beide Prompt-Layouts für beide Tags auf den ersten 100 dev-Fragen, mit eigenen Lauf- und Ergebnisordnern (`runs/_format_check`, `results/_format_check`) |
 | `src/cli.py` | Einstieg für alle Schritte |
 | `src/data/` | DB-Nachbau (TREQS), Datensatz-Konvertierung, Gold-Prüfung |
 | `src/inference/` | Prompt-Inhalt, modellspezifische Formate, Few-Shot-Auswahl, SQL-Extraktion, Runner |
@@ -179,17 +178,19 @@ alle erzeugten Tokens).
   Leaderboards und Filter funktionieren dort also wie gewohnt.
 - **Prompts:** Alle Modelle bekommen denselben Inhalt: Schema mit Spaltenbeschreibungen,
   Anweisung mit ausdrücklichem SQLite-Hinweis, k Beispiele aus train. SQLCoder und
-  DuckDB-NSQL erhalten ihn im Layout, auf das sie trainiert wurden (raw). Gesetzt sind
+  DuckDB-NSQL erhalten ihn als Rohtext ohne Chat-Template (raw): DuckDB-NSQL im Layout
+  seiner Model Card, SQLCoder im Layout aus dem nächsten Punkt. Gesetzt sind
   `temperature=0`, `seed=42` und `num_ctx` explizit.
-- **SQLCoder:** Die Ollama-Tags sind ältere Checkpoints mit je eigenem Prompt-Layout.
-  `sqlcoder:7b` ist nach Parameterzahl und Kontextlänge das Mistral-basierte
-  `defog/sqlcoder-7b` (Layout `sqlcoder_v2`, Defogs `prompt.md` vom 4.10.2023).
-  `sqlcoder:15b` ist laut Ollama-Seite `defog/sqlcoder` (Layout `sqlcoder_v1`, `prompt.md`
-  vom 18.8.2023). Beide Prompts enden mit einem geöffneten SQL-Codeblock, und die
-  Generierung stoppt wie in Defogs `inference.py` am schließenden Zaun (`stop` in der
-  Config). Abweichungen von Defogs Referenz: Greedy-Dekodierung statt Beam Search mit
-  5 Beams (in Ollama nicht verfügbar), SQLite statt Postgres, dazu unsere Anweisung, Regeln
-  und Beispiele.
+- **SQLCoder-Layout:** Der Prompt folgt Defogs aktuellem Layout mit `[QUESTION]…[/QUESTION]`
+  und `[SQL]`, das für `sqlcoder-7b-2` dokumentiert ist. Die Ollama-Tags `sqlcoder:7b` und
+  `sqlcoder:15b` sind ältere Checkpoints, für die Defog andere Layouts dokumentiert hat
+  (der Prompt endet dort mit einem geöffneten SQL-Codeblock). Ein Check mit diesen beiden
+  Layouts auf den ersten 100 dev-Fragen brachte keinen Vorteil. EX in % (bisheriges Layout /
+  Layout von `defog/sqlcoder` / Layout von `defog/sqlcoder-7b` und `sqlcoder2`):
+  sqlcoder-7b 3 / 4 / 3 mit `zero_shot` und 10 / 17 / 9 mit `few_similar_k3_values`,
+  sqlcoder-15b 49 / 52 / 41 und 78 / 49 / 47. Deshalb bleibt es beim bisherigen Layout.
+  Code und Config des Checks stehen in Commit `cc07b63`, die Läufe unter
+  `runs/_archive/20261111_format_check_sqlcoder/`.
 - **Kontextlänge:** Passt ein Prompt samt `num_predict` nicht in `num_ctx`, bricht der
   Lauf ab. Ollama kürzt ein `num_ctx` oberhalb der Kontextlänge des Modells ohne
   Fehlermeldung. `infer` vergleicht deshalb nach dem Laden die tatsächlich geladene

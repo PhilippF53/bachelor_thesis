@@ -1,12 +1,8 @@
-from pathlib import Path
-
-from src.config import load_config
 from src.data.convert import normalize_literals
 from src.inference.fewshot import FewShotSelector
-from src.inference.formats import RENDERERS, render
+from src.inference.formats import render
 from src.inference.prompts import Example, build_content
 
-FORMATS = ("chat", "sqlcoder_v1", "sqlcoder_v2", "duckdb_nsql")
 TRAIN = [
     {"key": f"k{i}", "question": q, "sql_norm": f"SELECT {i}"}
     for i, q in enumerate([
@@ -33,50 +29,13 @@ def test_similar_selection_puts_best_match_last():
 
 def test_formats_share_content_and_name_sqlite():
     content = build_content("CREATE TABLE LAB (LABEL TEXT);", "how many lab tests?", [Example("q1", "SELECT 1")])
-    assert set(FORMATS) == set(RENDERERS)
-    for fmt in FORMATS:
+    for fmt in ("chat", "sqlcoder", "duckdb_nsql"):
         text = render(fmt, content).as_text()
         assert "CREATE TABLE LAB" in text
         assert "how many lab tests?" in text
         assert "Question: q1\nSQL: SELECT 1" in text
         assert "SQLite" in text
-
-
-def test_sqlcoder_prompts_follow_the_layout_of_their_checkpoint():
-    content = build_content("CREATE TABLE LAB (LABEL TEXT);", "how many lab tests?", [Example("q1", "SELECT 1")])
-    v1 = render("sqlcoder_v1", content).prompt
-    v2 = render("sqlcoder_v2", content).prompt
-    # defog/sqlcoder: Instructions / Input / Response
-    assert v1.startswith("### Instructions:\nYour task is to convert a question into a SQL query")
-    assert "\n\n### Input:\nGenerate a SQL query that answers the question `how many lab tests?`.\n" in v1
-    assert "This query will run on a database whose schema is represented in this string:\nCREATE TABLE LAB" in v1
-    assert v1.endswith("### Response:\nBased on your instructions, here is the SQL query I have generated to "
-                       "answer the question `how many lab tests?`:\n```sql\n")
-    # defog/sqlcoder-7b and sqlcoder2: Task / Database Schema / SQL
-    assert v2.startswith("### Task\nGenerate a SQLite query to answer the following question:\n`how many lab tests?`\n")
-    assert ("\n\n### Database Schema\nThe query will run on a database with the following schema:\n"
-            "CREATE TABLE LAB") in v2
-    assert v2.endswith("### SQL\nGiven the database schema, here is the SQL query that answers "
-                       "`how many lab tests?`:\n```sql\n")
-    for prompt in (v1, v2):
-        # tags of the later sqlcoder-7b-2 format, which these checkpoints do not know
-        assert "[QUESTION]" not in prompt and "[SQL]" not in prompt
-        assert prompt.count("```") == 1  # only the opened block at the end
-
-
-def test_prompts_ending_with_an_opened_code_block_have_the_fence_as_stop_sequence():
-    """Without the stop sequence the model writes on after the closing fence, and the
-    extraction may take that text for the answer."""
-    content = build_content("CREATE TABLE LAB (LABEL TEXT);", "q", [])
-    checked = set()
-    for path in sorted(Path("config").glob("*.yaml")):
-        config = load_config(path)
-        for model in config.models:
-            prompt = render(model.format, content)
-            if prompt.mode == "raw" and prompt.prompt.endswith("```sql\n"):
-                assert "```" in model.options(config.inference).get("stop", []), f"{path.name}: {model.name}"
-                checked.add(model.name)
-    assert {"sqlcoder-7b", "sqlcoder-15b"} <= checked
+    assert render("sqlcoder", content).prompt.endswith("[SQL]\n")
 
 
 def test_normalize_literals_keeps_identifiers():
@@ -93,7 +52,7 @@ def test_prompt_template_tracks_prompt_text_only():
     variant = VariantConfig(name="few", k=3, strategy="random")
     before = prompt_template(model, variant, "CREATE TABLE LAB (LABEL TEXT);")
     assert before.count("<EXAMPLE_QUESTION>") == 3
-    assert prompt_template(ModelConfig(name="m", tag="m:1", format="sqlcoder_v2"), variant, "S") != \
+    assert prompt_template(ModelConfig(name="m", tag="m:1", format="sqlcoder"), variant, "S") != \
         prompt_template(model, variant, "S")
     prompts.RULES.append("extra rule")
     try:
@@ -106,7 +65,7 @@ def test_value_hints_only_change_prompts_that_use_them():
     plain = build_content("CREATE TABLE LAB (LABEL TEXT);", "q", [])
     hinted = build_content("CREATE TABLE LAB (LABEL TEXT);", "q", [], ["LAB.LABEL = 'Glucose'"])
     assert plain.schema_text == plain.schema
-    for fmt in FORMATS:
+    for fmt in ("chat", "sqlcoder", "duckdb_nsql"):
         assert "Values mentioned" not in render(fmt, plain).as_text()
         assert "-- LAB.LABEL = 'Glucose'" in render(fmt, hinted).as_text()
 

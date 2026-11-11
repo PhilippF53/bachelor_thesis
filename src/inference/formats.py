@@ -1,17 +1,7 @@
 """Model-specific rendering of the same PromptContent.
 
-`chat` goes through the model's chat template. The other formats are sent raw in the
-layout the checkpoint was fine-tuned on:
-
-- `sqlcoder_v1`: defog/sqlcoder (StarCoder, 15B), the checkpoint behind the Ollama tag
-  `sqlcoder:15b` according to its library page
-- `sqlcoder_v2`: defog/sqlcoder-7b (Mistral, Ollama tag `sqlcoder:7b`) and defog/sqlcoder2
-- `duckdb_nsql`: DuckDB-NSQL-7B
-
-Both SQLCoder prompts end with an opened ```sql block, and the answer ends at the closing
-fence. Models with these formats therefore need "```" as stop sequence (`extra_options`
-in the config), as in Defog's inference.py; otherwise the model writes on after the fence
-and the extraction may pick up that text.
+`chat` goes through the model's chat template. `sqlcoder` and `duckdb_nsql` are sent
+raw in the format the models were fine-tuned on.
 """
 
 from dataclasses import dataclass
@@ -43,35 +33,18 @@ def render_chat(c: PromptContent) -> RenderedPrompt:
     ])
 
 
-def render_sqlcoder_v1(c: PromptContent) -> RenderedPrompt:
-    # Layout of github.com/defog-ai/sqlcoder, prompt.md of 2023-08-18 (commit 2313019), with
-    # SQLite instead of Postgres, our instruction and rules, and the examples after the schema.
+def render_sqlcoder(c: PromptContent) -> RenderedPrompt:
     prompt = (
-        "### Instructions:\nYour task is to convert a question into a SQL query, given a SQLite "
-        f"database schema.\n{c.instruction}\nAdhere to these rules:\n{c.rules_text}\n\n"
-        f"### Input:\nGenerate a SQL query that answers the question `{c.question}`.\n"
-        f"This query will run on a database whose schema is represented in this string:\n{c.schema_text}\n\n"
-    )
-    if c.examples:
-        prompt += f"Examples:\n{c.examples_text}\n\n"
-    prompt += (
-        "### Response:\nBased on your instructions, here is the SQL query I have generated to answer "
-        f"the question `{c.question}`:\n```sql\n"
-    )
-    return RenderedPrompt("raw", prompt=prompt)
-
-
-def render_sqlcoder_v2(c: PromptContent) -> RenderedPrompt:
-    # Layout of github.com/defog-ai/sqlcoder, prompt.md of 2023-10-04 (commit 36d7795), with
-    # SQLite named in the task and the sections Instructions and Examples added.
-    prompt = (
-        f"### Task\nGenerate a SQLite query to answer the following question:\n`{c.question}`\n\n"
+        f"### Task\nGenerate a SQLite query to answer [QUESTION]{c.question}[/QUESTION]\n\n"
         f"### Instructions\n{c.instruction}\n{c.rules_text}\n\n"
         f"### Database Schema\nThe query will run on a database with the following schema:\n{c.schema_text}\n\n"
     )
     if c.examples:
         prompt += f"### Examples\n{c.examples_text}\n\n"
-    prompt += f"### SQL\nGiven the database schema, here is the SQL query that answers `{c.question}`:\n```sql\n"
+    prompt += (
+        f"### Answer\nGiven the database schema, here is the SQL query that "
+        f"[QUESTION]{c.question}[/QUESTION]\n[SQL]\n"
+    )
     return RenderedPrompt("raw", prompt=prompt)
 
 
@@ -91,8 +64,7 @@ def render_duckdb_nsql(c: PromptContent) -> RenderedPrompt:
 
 RENDERERS = {
     "chat": render_chat,
-    "sqlcoder_v1": render_sqlcoder_v1,
-    "sqlcoder_v2": render_sqlcoder_v2,
+    "sqlcoder": render_sqlcoder,
     "duckdb_nsql": render_duckdb_nsql,
 }
 

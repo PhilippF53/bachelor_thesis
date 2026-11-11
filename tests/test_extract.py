@@ -16,12 +16,9 @@ Q = 'SELECT COUNT ( DISTINCT DEMOGRAPHIC."SUBJECT_ID" ) FROM DEMOGRAPHIC WHERE D
     (f"SQL: {Q}", "plain"),
     (f"{Q}\n[/SQL]", "plain"),
     (f"[SQL] {Q} [/SQL]", "sql_tag"),
-    # sqlcoder-7b with a prompt that ends with "[SQL]" (archived runs): another opening tag follows
+    # SQLCoder prompt ends with "[SQL]"; sqlcoder-7b appends another opening tag
     (f" {Q};\n[SQL]", "plain"),
     (f" {Q}\n[SQL]", "plain"),
-    # SQLCoder with the opened ```sql block and "```" as stop sequence: only the query arrives
-    (f"{Q};\n", "plain"),
-    (f" {Q}\n", "plain"),
     (f"```sql\n{Q}", "code_block"),
     # stray closing fence after plain SQL (seen with qwen3-coder)
     (f"{Q}\n```", "plain"),

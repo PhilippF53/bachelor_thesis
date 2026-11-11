@@ -50,14 +50,9 @@ selection:
 models:
   - {name: duckdb-nsql-7b, tag: "duckdb-nsql:latest", format: duckdb_nsql}
   - {name: codellama-7b, tag: "codellama:7b-instruct", format: chat}
-  # SQLCoder prompts end with an opened ```sql block: generation stops at the closing fence, as in
-  # Defog's inference.py. A stop list in the request replaces the one of the Ollama Modelfile
-  # ("<|endoftext|>"), so that one is repeated here.
-  - {name: sqlcoder-7b, tag: "sqlcoder:7b", format: sqlcoder_v2,
-     extra_options: {stop: ["```", "<|endoftext|>"]}}
+  - {name: sqlcoder-7b, tag: "sqlcoder:7b", format: sqlcoder}
   - {name: codellama-13b, tag: "codellama:13b-instruct", format: chat}
-  - {name: sqlcoder-15b, tag: "sqlcoder:15b", format: sqlcoder_v1,
-     extra_options: {stop: ["```", "<|endoftext|>"]}}
+  - {name: sqlcoder-15b, tag: "sqlcoder:15b", format: sqlcoder}
   - {name: gpt-oss-20b, tag: "gpt-oss:20b", format: chat, think: medium, num_ctx: 16384, num_predict: 8192}
   - {name: qwen3-coder-30b, tag: "qwen3-coder:30b", format: chat}
   - {name: codellama-34b, tag: "codellama:34b-instruct", format: chat}
