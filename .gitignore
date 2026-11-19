@@ -9,12 +9,20 @@ wheels/
 # Virtual environments
 .venv
 .env
+.claude
 
 # Directories
 /data/
+/runs/
+/results/*/runs/
+/results/_archive/
+/results/*/all_samples.csv
 
 # Files
 todo
 scratchpad.ipynb
 *.sqlite
 *.db
+
+# Logs of long runs
+/logs/
